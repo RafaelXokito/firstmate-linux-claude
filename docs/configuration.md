@@ -14,6 +14,12 @@ The tracked code root contains the shared instruction, skill, documentation, wor
 `state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, away-mode state, generated Relay artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 
+A home can sit in either of two places, and both use the same directories and the same state contracts.
+In the CLASSIC layout the tracked clone is also the home, and each project is cloned into its `projects/` directory.
+In the PER-PROJECT layout the home is `<project>/.firstmate` inside a project checkout, one shared tracked clone serves every such home, and that home's `projects/` holds a single symlink back to the enclosing checkout.
+[`bin/fm-project-home.sh`](../bin/fm-project-home.sh) owns the per-project home's created child paths and its convergence mechanics, including how the home is kept out of the project's git and why it deliberately has no `bin/` symlink.
+[`bin/fm-launch.sh`](../bin/fm-launch.sh) is the operator entry point that resolves which layout serves the working directory and exports `FM_HOME` together with `FM_ROOT_OVERRIDE`; see "FM_HOME" below for what each variable selects.
+
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 Wake, watcher, away-mode, and Relay-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
@@ -196,6 +202,8 @@ A standalone-clone home cannot receive a primary-local commit through that no-fe
 When it is unset, most scripts use the repo root as the home; when it is set, scripts still run from this repo's `bin/`, but `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.
 `FM_ROOT_OVERRIDE` overrides the firstmate repo root used by scripts, including the primary checkout watched by the worktree-tangle guard.
 When `FM_HOME` is unset, it also behaves as the old whole-root override.
+A per-project home must set both: `FM_HOME` selects `<project>/.firstmate` and `FM_ROOT_OVERRIDE` names the shared tracked clone, because a script that resolved its code root from inside the home would aim the worktree-tangle guard at the project's own branch and alarm on every feature branch.
+`bin/fm-launch.sh` exports the pair, and `bin/fm-launch.sh env` prints it for a shell that needs it directly.
 `bin/fm-send.sh` is intentionally stricter than that general fallback: it requires `FM_HOME` to be set before resolving a target, so operator steers cannot silently resolve against the wrong home.
 `FM_STATE_OVERRIDE`, `FM_DATA_OVERRIDE`, `FM_PROJECTS_OVERRIDE`, and `FM_CONFIG_OVERRIDE` override individual operational directories for tests and specialized harness setup.
 Before `fm-brief.sh`, `fm-spawn.sh`, or `fm-afk-launch.sh` persists a path or passes it to another process, it resolves each applicable relative `FM_HOME`, `FM_STATE_OVERRIDE`, or `FM_DATA_OVERRIDE` directory against the caller's working directory, preserves absolute spellings unchanged, and rejects an unresolvable relative directory with the offending variable named.
@@ -294,10 +302,12 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
 It installs automatically supported tools only after you say go; manual-only tools remain for you to install from the printed instructions.
 Required tools come in two parts: a universal toolchain every home needs regardless of backend, and a per-backend delta that follows the runtime backend actually resolved for this home.
-The universal toolchain is node, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.31.2 or newer, compatible gh-axi, chrome-devtools-axi, compatible lavish-axi, compatible tasks-axi per "Backlog backend" above, and compatible quota-axi.
+The universal toolchain is node, git, no-mistakes v1.31.2 or newer, chrome-devtools-axi, compatible lavish-axi, compatible tasks-axi per "Backlog backend" above, and compatible quota-axi.
+Forge tooling is NOT universal: `gh` with GitHub auth via `gh auth login` plus compatible `gh-axi` are required only of a home that has a GitHub project, `glab` only of one with a GitLab project, and `curl` only of one with a Bitbucket project.
+That set follows the providers this home's registered project origins resolve to, so a machine with no GitHub login is never blocked by an auth probe for a forge its projects do not use; see "Forge map" below.
 [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) owns the axi-family floor policy and the gh-axi and lavish-axi floors, while [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) and [`bin/fm-quota-axi-lib.sh`](../bin/fm-quota-axi-lib.sh) hold their own tools' floor constants.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
-In that list, no-mistakes runs the validation pipeline, gh-axi, chrome-devtools-axi, and lavish-axi cover GitHub, browser, and rich-review operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
+In that list, no-mistakes runs the validation pipeline, chrome-devtools-axi and lavish-axi cover browser and rich-review operations, gh-axi covers GitHub delivery when that forge is in use, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
 The per-backend delta is required only for the backend resolved from `FM_BACKEND`, then `config/backend`, then runtime auto-detection, then default `tmux`, so a home is never told to install a tool an inactive backend or feature would need.
 That delta is owned in code by `fm_backend_required_tools` in `bin/fm-backend.sh`: the resolved backend's own session-provider CLI (`tmux`, `herdr`, `zellij`, `orca`, or `cmux`), `jq` for the JSON-emitting experimental adapters (`herdr`, `zellij`, `cmux`) whose spawn and liveness paths parse the backend's JSON output, and the `treehouse` worktree provider for every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`).
 Backend tool availability uses the adapter's own executable resolver, so bootstrap and spawn agree on supported non-`PATH` locations such as cmux's bundled CLI.
@@ -333,6 +343,31 @@ A changed remote home instead receives one durably recorded marked re-read instr
 The locked bootstrap inheritance pass uses the same placement-specific behavior; see `secondmate-provisioning` for the single contract owner.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
+
+## Forge map (config/forge-map)
+
+Firstmate resolves each registered project's forge from its `origin` host, and that answer decides which delivery CLI the home needs and which authentication is worth probing.
+[`bin/fm-forge-lib.sh`](../bin/fm-forge-lib.sh) is the single owner of that resolution and its order: the optional `config/forge-map` table first, then a hostname heuristic for the three self-evident names, then `unknown`.
+Nothing here is a security boundary; [`bin/fm-project-origin-lib.sh`](../bin/fm-project-origin-lib.sh) owns clone-URL safety and deliberately has no forge or domain allowlist.
+
+`config/forge-map` is gitignored, inherited by no other home, and holds one `<host> <provider>` pair per line, with `#` comments and blank lines ignored.
+The provider must be `github`, `gitlab`, `bitbucket`, or `none`, where `none` marks a host whose projects ship without a forge.
+
+```
+# a self-hosted instance whose name says nothing about its forge
+git.corp.example      github
+bitbucket.corp.example bitbucket
+```
+
+The table exists because a self-hosted instance can be named anything: GitHub Enterprise at `git.corp.example` would otherwise fall to `unknown`.
+An unmapped host is reported as a `FORGE_UNKNOWN:` bootstrap line and never silently treated as forge-free, because guessing "no forge" is exactly what would drop a real gate.
+A local, `file:`, or absent origin resolves to `none` with no report.
+
+Bitbucket support covers Bitbucket Server and Data Center through REST API 1.0, authenticated with a Personal Access Token read from `BITBUCKET_PAT` or the home's gitignored `.env`.
+The instance always comes from the pull request URL's own host rather than a configured base URL, so a doctored record cannot redirect the request or the token elsewhere.
+Bitbucket Cloud is not supported: its URL carries no `projects/<key>/repos/<slug>` pair and its API is a different version with a different credential, so a cloud URL is refused rather than armed against an endpoint that does not exist.
+A Bitbucket task records no `pr_head=`, the same as a GitLab task and for the same reason, and both consumers already treat that field as optional.
+[`docs/bitbucket-merge-watch.md`](bitbucket-merge-watch.md) is the maintainer-verification record for that path, including what is not yet proven against a live instance; [`docs/gitlab-merge-watch.md`](gitlab-merge-watch.md) is its GitLab counterpart.
 
 ## Relay (.env)
 
@@ -520,7 +555,9 @@ Runtime tuning via environment variables (defaults shown):
 
 ```sh
 FM_HOME=                 # optional operational home for most scripts, unset means this repo root; fm-send requires it explicitly
-FM_ROOT_OVERRIDE=        # override firstmate repo root, tangle-guard target, and zellij/cmux home-title hash; also legacy whole-root override when FM_HOME is unset
+FM_ROOT_OVERRIDE=        # override firstmate repo root, tangle-guard target, and zellij/cmux home-title hash; also legacy whole-root override when FM_HOME is unset; required alongside FM_HOME for a per-project home
+FM_LAUNCH_CMD=           # harness command bin/fm-launch.sh execs in the resolved home; default claude
+BITBUCKET_PAT=           # Bitbucket Server Personal Access Token for the merge watch and merge; also read from $FM_HOME/.env
 FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests

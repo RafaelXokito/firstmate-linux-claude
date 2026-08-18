@@ -57,6 +57,19 @@ if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
   exit 1
 fi
+# Bitbucket Server ships no CLI, so its watch needs curl and a Personal Access
+# Token. Both are refused here for the same reason glab is: a silent poll cannot
+# tell "no credential" apart from "never merged".
+if [ "$PROVIDER" = bitbucket ]; then
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "error: watching a Bitbucket pull request requires curl on PATH" >&2
+    exit 1
+  fi
+  if ! fm_pr_bitbucket_token "$FM_HOME" >/dev/null; then
+    echo "error: watching a Bitbucket pull request requires a Personal Access Token in BITBUCKET_PAT or $FM_HOME/.env" >&2
+    exit 1
+  fi
+fi
 
 # Neutralize any pre-fix poll before recording or arming this task. The
 # migration never executes legacy artifacts and holds watcher exclusion while

@@ -41,6 +41,33 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
 
 # A fake toolchain where every required tool is present and gh is authenticated.
 # treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
+# Echo a directory that mirrors BASE_PATH with <tool> deliberately absent.
+#
+# A case that proves a tool is REPORTED MISSING cannot rely on the host simply
+# not having it. "orca" is the clearest example: on a Linux desktop /usr/bin/orca
+# is the GNOME Orca screen reader, an unrelated program that satisfies the plain
+# `command -v orca` probe and makes the case pass vacuously - it reports nothing
+# missing, and the assertion fails only because the expected line is absent. This
+# is the same hermeticity discipline as pinning PATH via BASE_PATH and unsetting
+# the ambient runtime markers above.
+base_path_without() {  # <case-dir> <tool>
+  local dir=$1 tool=$2 mirror bindir entry name
+  mirror="$dir/nopath-$tool"
+  mkdir -p "$mirror"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = "$tool" ] && continue
+      [ -e "$mirror/$name" ] || ln -s "$entry" "$mirror/$name" 2>/dev/null
+    done
+  done <<EOF
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  printf '%s\n' "$mirror"
+}
+
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -167,6 +194,18 @@ add_origin_backed_projects() {
   done
 }
 
+# Register one project clone whose origin host resolves to <forge>. Forge CLI
+# requirements and the GitHub auth probe are driven by the providers a home's
+# project origins actually use, so a case that wants either must say which forge
+# this home works with rather than relying on a universal requirement.
+add_forge_project() {  # <home> <name> <origin-host>
+  local home=$1 name=$2 host=$3 repo
+  repo="$home/projects/$name"
+  mkdir -p "$home/projects"
+  git init -q "$repo"
+  git -C "$repo" remote add origin "https://$host/owner/$name"
+}
+
 add_no_origin_projects() {
   local home=$1 count=$2 i repo
   mkdir -p "$home/projects"
@@ -244,6 +283,69 @@ assert_timeout_report() {
 #   mode=empty -> output must be empty (expect/notcontains ignored)
 #   mode=exact -> output must equal <expect>
 #   mode=grep  -> output must contain <expect> (fixed string); <notcontains> must not appear
+# Forge CLIs and the GitHub auth probe follow the providers a home's project
+# origins actually use, instead of being demanded of every home. The captain's
+# case is a work machine with no GitHub login whose projects live on Bitbucket:
+# there, requiring gh and probing its auth blocks dispatch for a forge the home
+# never touches.
+test_forge_requirements_follow_project_origins() {
+  local case_dir fakebin no_gh out
+  case_dir="$TMP_ROOT/forge-gate"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  # gh must be absent from the WHOLE search path: it is installed on this repo's
+  # own developer machines, and a real gh would make every case below vacuous.
+  no_gh=$(base_path_without "$case_dir" gh)
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  ! PATH="$no_gh" command -v gh >/dev/null 2>&1 \
+    || fail "the gh-free search path still resolved gh"
+
+  run_forge_case() {
+    PATH="$fakebin:$no_gh" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh"
+  }
+
+  # A home with no projects yet needs no forge CLI at all.
+  out=$(run_forge_case)
+  assert_not_contains "$out" "MISSING: gh" "a home with no projects must not require a GitHub CLI"
+  assert_not_contains "$out" "NEEDS_GH_AUTH" "a home with no projects must not probe GitHub auth"
+
+  # A Bitbucket-only home still needs no gh, and still must not be auth-probed.
+  add_forge_project "$case_dir/home" work bitbucket.example.invalid
+  out=$(run_forge_case)
+  assert_not_contains "$out" "MISSING: gh" "a Bitbucket-only home must not require a GitHub CLI"
+  assert_not_contains "$out" "NEEDS_GH_AUTH" "a Bitbucket-only home must not probe GitHub auth"
+
+  # Add one GitHub project and both requirements appear, so the gate is narrowed
+  # rather than removed.
+  add_forge_project "$case_dir/home" oss github.com
+  out=$(run_forge_case)
+  assert_contains "$out" "MISSING: gh (install:" "a home with a GitHub project must require gh"
+  assert_contains "$out" "MISSING: gh-axi (install:" "a home with a GitHub project must require gh-axi"
+
+  # An origin host that maps to no known forge is reported, never assumed
+  # forge-free: silently guessing would drop the gate for a self-hosted instance.
+  rm -rf "$case_dir/home/projects"
+  add_forge_project "$case_dir/home" corp git.corp.invalid
+  out=$(run_forge_case)
+  assert_contains "$out" "FORGE_UNKNOWN:" "an unmapped origin host must be reported"
+
+  # config/forge-map is the authority, so mapping that host resolves it.
+  printf 'git.corp.invalid github\n' > "$case_dir/home/config/forge-map"
+  out=$(run_forge_case)
+  assert_not_contains "$out" "FORGE_UNKNOWN:" "a mapped host must no longer be reported as unknown"
+  assert_contains "$out" "MISSING: gh (install:" "a host mapped to github must require gh"
+
+  printf 'git.corp.invalid none\n' > "$case_dir/home/config/forge-map"
+  out=$(run_forge_case)
+  assert_not_contains "$out" "MISSING: gh" "a host mapped to none must require no forge CLI"
+  assert_not_contains "$out" "FORGE_UNKNOWN:" "a host mapped to none must not be reported as unknown"
+
+  unset -f run_forge_case
+  pass "bootstrap: forge CLIs and the GitHub auth probe follow this home's project origins"
+}
+
 test_bootstrap_reporting() {
   local label lease tasks quota backend mode expect notcontains case_dir fakebin out n archive_body multi_id
   n=0
@@ -511,7 +613,7 @@ SH
 }
 
 test_orca_backend_gates_orca_tool_only_when_selected() {
-  local case_dir fakebin out missing_orca
+  local case_dir fakebin out missing_orca no_orca
   missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
 
   case_dir="$TMP_ROOT/orca-backend-selected"
@@ -519,7 +621,12 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' orca > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain "$case_dir")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  # An unrelated host program named orca (the GNOME screen reader) would satisfy
+  # the availability probe and make this case pass while asserting nothing.
+  no_orca=$(base_path_without "$case_dir" orca)
+  ! PATH="$no_orca" command -v orca >/dev/null 2>&1 \
+    || fail "the orca-free search path still resolved orca"
+  out=$(PATH="$fakebin:$no_orca" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = "$missing_orca" ] || fail "backend=orca should require only the Orca-specific missing tool, got: $out"
 
@@ -887,31 +994,39 @@ test_routine_bootstrap_contract_runs_under_system_bash() {
 # split is a PARTITION: `skip` plus `only` together do exactly what `all` does,
 # with no step dropped and no step run twice.
 test_network_phase_partitions_the_run() {
-  local case_dir fakebin all_out skip_out only_out combined
+  local case_dir fakebin all_out skip_out only_out combined no_node
   case_dir="$TMP_ROOT/network-phase"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
+  # The network half is represented by the GitHub auth probe, which runs only for
+  # a home that actually has GitHub work, so this home registers a GitHub project.
+  add_forge_project "$case_dir/home" app github.com
   # Break the two diagnostics that stand for the two halves: a local tool floor
-  # and the network GitHub-auth probe.
+  # and the network GitHub-auth probe. node must be absent from the WHOLE search
+  # path, not just the fakebin: /usr/bin/node is present on many hosts and would
+  # otherwise satisfy the probe and make the local half assert nothing.
   rm -f "$fakebin/node"
+  no_node=$(base_path_without "$case_dir" node)
+  ! PATH="$no_node" command -v node >/dev/null 2>&1 \
+    || fail "the node-free search path still resolved node"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 1
 SH
   chmod +x "$fakebin/gh"
 
-  all_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  all_out=$(PATH="$fakebin:$no_node" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$all_out" "MISSING: node (install:" "the unsplit run lost its local diagnostic"
   assert_contains "$all_out" "NEEDS_GH_AUTH" "the unsplit run lost its network diagnostic"
 
-  skip_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  skip_out=$(PATH="$fakebin:$no_node" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$skip_out" "MISSING: node (install:" "the local half lost its own diagnostic"
   assert_not_contains "$skip_out" "NEEDS_GH_AUTH" "the local half still made a network call"
 
-  only_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  only_out=$(PATH="$fakebin:$no_node" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$only_out" "NEEDS_GH_AUTH" "the network half lost its own diagnostic"
   assert_not_contains "$only_out" "MISSING: node" "the network half repeated the local half's work"
@@ -922,7 +1037,7 @@ SH
 
   # A typo must never silently drop a safety sweep, so anything unrecognized
   # resolves to the complete run.
-  [ "$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  [ "$(PATH="$fakebin:$no_node" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=sikp "$ROOT/bin/fm-bootstrap.sh")" = "$all_out" ] \
     || fail "an unrecognized FM_BOOTSTRAP_NETWORK value did not fall back to the complete run"
   pass "bootstrap: FM_BOOTSTRAP_NETWORK partitions one run into local and network halves"
@@ -1176,3 +1291,4 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_forge_requirements_follow_project_origins

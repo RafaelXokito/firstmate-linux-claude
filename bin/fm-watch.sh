@@ -64,6 +64,14 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+# Exported, not just assigned: a state check runs as a CHILD of this watcher and
+# some checks must resolve this home to do their job. The Bitbucket merge poll is
+# the concrete case - it reads its credential from $FM_HOME/.env, and this
+# watcher invokes it through fm-pr-poll.sh's --validated form, where the poll has
+# no state-file path to infer the home from. Left unexported, that poll finds no
+# credential and stays silent, which is indistinguishable from "not merged": the
+# watch would never fire and nothing would report why.
+export FM_HOME
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 mkdir -p "$STATE"
 

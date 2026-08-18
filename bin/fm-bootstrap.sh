@@ -136,6 +136,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
+# shellcheck source=bin/fm-forge-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-forge-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh disable=SC1091
@@ -784,14 +786,27 @@ missing_tool_diagnostic() {
 # fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
 # never told tmux is missing, and only orca drops treehouse. A backend value with
 # no verified dependency set is reported before the universal checks continue.
-COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
+COMMON_TOOLS="node git no-mistakes chrome-devtools-axi lavish-axi tasks-axi quota-axi"
+# Forge CLIs are NOT universal. gh and gh-axi are needed by a home that has a
+# GitHub project and by no other, so they are resolved from the providers this
+# home's project origins actually use (bin/fm-forge-lib.sh). A home with only
+# Bitbucket or GitLab work is never told gh is missing, and a machine with no
+# GitHub login is never blocked by an auth probe for a forge it does not touch.
+# An origin whose host maps to no known provider is reported rather than assumed
+# forge-free, so an unmapped GitHub Enterprise host cannot silently drop the gate.
+FORGE_PROVIDERS=$(fm_forge_providers_in_use "$PROJECTS" "$CONFIG" || true)
+FORGE_TOOLS=
+for __fm_provider in $FORGE_PROVIDERS; do
+  FORGE_TOOLS="$FORGE_TOOLS $(fm_forge_required_tools "$__fm_provider")"
+done
+unset __fm_provider
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
 if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
   BACKEND_VALID=0
   BACKEND_TOOLS=""
 fi
-TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
+TOOLS="$BACKEND_TOOLS $COMMON_TOOLS $FORGE_TOOLS"
 NO_MISTAKES_MIN=1.31.2
 # AXI-FAMILY FLOOR POLICY. Every axi-family floor is the CURRENT LATEST published
 # version of that tool, captain-bumped periodically to keep the whole fleet on the
@@ -1133,9 +1148,14 @@ detect_local_tools() {
     fm_backend_required_tool_available "$BACKEND" "$t" \
       || missing_tool_diagnostic "$t"
   done
-  for t in $COMMON_TOOLS; do
+  for t in $COMMON_TOOLS $FORGE_TOOLS; do
     command -v "$t" >/dev/null || missing_tool_diagnostic "$t"
   done
+  case " $FORGE_PROVIDERS " in
+    *' unknown '*)
+      echo "FORGE_UNKNOWN: a project origin host maps to no known forge; add a '<host> <github|gitlab|bitbucket|none>' line to config/forge-map so its delivery tools and auth are gated correctly"
+      ;;
+  esac
   # The treehouse lease-support upgrade check is only relevant when the resolved
   # backend actually requires treehouse (every backend except orca, which owns its
   # own worktrees); an orca home must not be told to upgrade a provider it never uses.
@@ -1208,7 +1228,9 @@ detect_local_config() {
 local_phase && detect_local_tools
 if network_phase; then
   __fm_timing_stamp=$(fm_timing_now_ms)
-  gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+  case " $FORGE_PROVIDERS " in
+    *' github '*) gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH" ;;
+  esac
   fm_timing_record phase gh-auth "$__fm_timing_stamp"
 fi
 local_phase && detect_local_config

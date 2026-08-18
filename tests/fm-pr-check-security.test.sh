@@ -99,7 +99,18 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
-  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
+  # Bitbucket Server ships no CLI, so its watch is curl against REST API 1.0.
+  # The mock reproduces the contract the poll depends on: the response body on
+  # stdout and exit 0, or a non-zero exit with no body on a transport failure.
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+printf '%s
+' "$*" >> "$FM_TEST_CURL_LOG"
+[ "${FM_TEST_CURL_FAIL:-0}" = 0 ] || exit 1
+printf '%s' "${FM_TEST_CURL_BODY:-{"id":1,"version":0,"state":"OPEN"\}}"
+SH
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/curl"
+  : > "$dir/curl.log"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
@@ -250,6 +261,7 @@ run_check_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_CURL_LOG="$dir/curl.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
@@ -260,6 +272,7 @@ run_merge_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_CURL_LOG="$dir/curl.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -283,6 +296,25 @@ INVALID_URLS=(
   'https://.gitlab.com/g/p/-/merge_requests/1'
   'https://gitlab.com./g/p/-/merge_requests/1'
   'http://gitlab.com/g/p/-/merge_requests/1'
+  'https://bitbucket.org/team/repo/pull-requests/42'
+  'https://github.com/projects/K/repos/R/pull-requests/1'
+  'https://bb.example/projects/K/repos/R/pull-requests/0'
+  'https://bb.example/projects/K/repos/R/pull-requests/01'
+  'https://bb.example/projects/K/repos/R/pull-requests/1/evil'
+  'https://bb.example/projects/K/repos/R/pull-requests/1?x=1'
+  'https://bb.example/projects/K/repos/R/pull-requests/1#c'
+  'https://bb.example/projects/K/repos/R/pull-requests/1/'
+  'https://bb.example/projects/K/repos/../pull-requests/1'
+  'https://bb.example/projects/../repos/R/pull-requests/1'
+  'https://bb.example/projects/~/repos/R/pull-requests/1'
+  'https://bb.example/projects/K/repos/R.git/pull-requests/1'
+  'https://bb.example/projects/K/repos/A/B/pull-requests/1'
+  'https://bb.example:443/projects/K/repos/R/pull-requests/1'
+  'https://user@bb.example/projects/K/repos/R/pull-requests/1'
+  'http://bb.example/projects/K/repos/R/pull-requests/1'
+  'https://BB.example/projects/K/repos/R/pull-requests/1'
+  'https://.bb.example/projects/K/repos/R/pull-requests/1'
+  'https://bb.example./projects/K/repos/R/pull-requests/1'
   'https://github.com/o/r/pull/1/'
   ' https://github.com/o/r/pull/1'
   'https://github.com/o/r/pull/1 '
@@ -418,6 +450,27 @@ https://gitlab.com/group/project/-/merge_requests/1|gitlab.com|group/project|1
 https://gitlab.com/group/sub/deep/project/-/merge_requests/42|gitlab.com|group/sub/deep/project|42
 https://gitlab.example.co.uk/g/p/-/merge_requests/7|gitlab.example.co.uk|g/p|7
 https://code.internal/team/tools/ci-runner/-/merge_requests/123456|code.internal|team/tools/ci-runner|123456
+EOF
+  # Bitbucket Server: the host is data exactly as it is for GitLab, the stored
+  # path is always the project key and the repository slug, and a web-UI view
+  # segment is dropped so the stored URL is the canonical one every consumer
+  # reconstructs.
+  while IFS='|' read -r url canonical host path number; do
+    [ -n "$url" ] || continue
+    fm_pr_url_parse "$url" || fail "parser rejected a canonical Bitbucket pull request URL"
+    [ "$FM_PR_PROVIDER" = bitbucket ] || fail "parser did not tag a Bitbucket URL as bitbucket"
+    [ "$FM_PR_URL" = "$canonical" ] || fail "parser did not canonicalize a Bitbucket URL"
+    [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong Bitbucket host"
+    [ "$FM_PR_PATH" = "$path" ] || fail "parser returned wrong Bitbucket project path"
+    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong Bitbucket pull request number"
+    [ -z "$FM_PR_OWNER" ] && [ -z "$FM_PR_REPO" ] \
+      || fail "parser set GitHub owner/repository for a Bitbucket URL"
+  done <<'EOF'
+https://bb.example/projects/KEY/repos/repo/pull-requests/1|https://bb.example/projects/KEY/repos/repo/pull-requests/1|bb.example|KEY/repo|1
+https://bb.example/projects/KEY/repos/repo/pull-requests/193/overview|https://bb.example/projects/KEY/repos/repo/pull-requests/193|bb.example|KEY/repo|193
+https://bb.example/projects/KEY/repos/repo/pull-requests/7/diff|https://bb.example/projects/KEY/repos/repo/pull-requests/7|bb.example|KEY/repo|7
+https://bb.example/projects/~user/repos/spike/pull-requests/2/activity|https://bb.example/projects/~user/repos/spike/pull-requests/2|bb.example|~user/spike|2
+https://git.corp.internal/projects/A_B/repos/deep-name_1.x/pull-requests/123456|https://git.corp.internal/projects/A_B/repos/deep-name_1.x/pull-requests/123456|git.corp.internal|A_B/deep-name_1.x|123456
 EOF
   fm_pr_url_parse https://github.com/a/b/pull/1 || fail "parser rejected canonical URL"
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
@@ -717,6 +770,7 @@ make_poll_fixture() {
 run_poll() {
   local dir=$1
   FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_CURL_LOG="$dir/curl.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
 }
@@ -2899,6 +2953,159 @@ EOF
   pass "GitLab merge requests are followed on any instance and never wake falsely"
 }
 
+# Bitbucket Server and Data Center have no CLI, so the merge watch is curl
+# against REST API 1.0 and the credential is read at run time. The properties
+# that matter are the same ones the GitLab watch has: the instance comes from the
+# stored record, only an exact merged state wakes firstmate, and every failure -
+# including an absent credential - stays silent rather than reporting a merge.
+test_bitbucket_merge_watch() {
+  local dir state out rc url value nocurl entry bindir name
+  dir=$(make_case bitbucket-merge-watch)
+  state="$dir/home/state"
+  url=https://bb.example/projects/KEY/repos/repo/pull-requests/7
+  # The operator's own credential must not leak into this fixture: the poll reads
+  # BITBUCKET_PAT from the environment first, so a real token on the developer's
+  # shell would make the no-credential cases below silently vacuous.
+  unset BITBUCKET_PAT
+  printf 'BITBUCKET_PAT=fixture-token\n' > "$dir/home/.env"
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a bitbucket "$url" bb.example KEY/repo 7 "$POLL" \
+    || fail "could not prepare a Bitbucket poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Bitbucket poll"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "published Bitbucket poll provenance or metadata binding was invalid"
+  [ "$(cat "$state/task-a.pr-poll")" = "bitbucket
+$url
+bb.example
+KEY/repo
+7" ] || fail "published Bitbucket sidecar bytes were not exact"
+
+  # Only an exact merged state wakes. An open or declined pull request, an auth
+  # failure, an error page, and an empty body all stay silent.
+  for value in \
+    '{"id":7,"version":2,"state":"OPEN"}' \
+    '{"id":7,"version":2,"state":"DECLINED"}' \
+    '{"id":7,"version":2,"state":"merged"}' \
+    '{"errors":[{"message":"Authentication failed"}]}' \
+    '<html>502 Bad Gateway</html>' \
+    '' ; do
+    out=$(FM_TEST_CURL_BODY="$value" run_poll "$dir")
+    [ -z "$out" ] || fail "Bitbucket poll emitted for a non-merged response"
+  done
+  out=$(FM_TEST_CURL_BODY='{"id":7,"version":3,"state":"MERGED","closed":true}' run_poll "$dir")
+  [ "$out" = merged ] || fail "Bitbucket poll did not emit exactly one merged line"
+
+  # Whitespace in the response must not change the verdict, and a transport
+  # failure must not either.
+  out=$(FM_TEST_CURL_BODY='{ "id" : 7 , "state" : "MERGED" }' run_poll "$dir")
+  [ "$out" = merged ] || fail "Bitbucket poll missed a merged state formatted with whitespace"
+  out=$(FM_TEST_CURL_FAIL=1 FM_TEST_CURL_BODY='{"state":"MERGED"}' run_poll "$dir")
+  [ -z "$out" ] || fail "Bitbucket poll emitted after a curl failure"
+
+  # The instance and the pull request come from the stored record: the request is
+  # the REST 1.0 endpoint for that exact host, project key, slug, and number.
+  grep -qF -- "https://bb.example/rest/api/1.0/projects/KEY/repos/repo/pull-requests/7" "$dir/curl.log" \
+    || fail "Bitbucket poll did not address the REST endpoint derived from the stored record"
+
+  # A doctored sidecar cannot redirect the poll or the credential to another
+  # host or repository: the stored parts must rebuild the stored URL exactly.
+  printf '%s\n%s\n%s\n%s\n%s\n' bitbucket "$url" elsewhere.example KEY/repo 7 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_CURL_BODY='{"state":"MERGED"}' run_poll "$dir")
+  [ -z "$out" ] || fail "Bitbucket poll emitted for a sidecar whose host was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' bitbucket "$url" bb.example KEY/other 7 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_CURL_BODY='{"state":"MERGED"}' run_poll "$dir")
+  [ -z "$out" ] || fail "Bitbucket poll emitted for a sidecar whose repository was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' bitbucket "$url" bb.example KEY/repo 7 \
+    > "$state/task-a.pr-poll"
+
+  # No credential means no watch, never a false merge.
+  rm -f "$dir/home/.env"
+  out=$(FM_TEST_CURL_BODY='{"state":"MERGED"}' run_poll "$dir")
+  [ -z "$out" ] || fail "Bitbucket poll emitted with no credential available"
+  out=$(BITBUCKET_PAT=from-env FM_TEST_CURL_BODY='{"state":"MERGED"}' run_poll "$dir")
+  [ "$out" = merged ] || fail "Bitbucket poll did not use a credential supplied in the environment"
+
+  # The WATCHER does not run the published check by path; it runs the shared
+  # program's --validated form, where there is no state-file path to infer the
+  # home from. That form must still find the credential through FM_HOME, or the
+  # watch stays silent forever and looks exactly like "not merged".
+  printf 'BITBUCKET_PAT=fixture-token\n' > "$dir/home/.env"
+  out=$(FM_HOME="$dir/home" FM_TEST_CURL_BODY='{"state":"MERGED"}' \
+    FM_TEST_CURL_LOG="$dir/curl.log" PATH="$dir/fakebin:$BASE_PATH" \
+    env -u BITBUCKET_PAT "$POLL" --validated \
+    bitbucket "$url" bb.example KEY/repo 7)
+  [ "$out" = merged ] || fail "the watcher's --validated form did not resolve the credential through FM_HOME"
+  out=$(FM_HOME="$dir/home" FM_TEST_CURL_BODY='{"state":"OPEN"}' \
+    FM_TEST_CURL_LOG="$dir/curl.log" PATH="$dir/fakebin:$BASE_PATH" \
+    env -u BITBUCKET_PAT "$POLL" --validated \
+    bitbucket "$url" bb.example KEY/repo 7)
+  [ -z "$out" ] || fail "the watcher's --validated form emitted for an open pull request"
+  printf 'export BITBUCKET_PAT="fixture-token"\n' > "$dir/home/.env"
+  out=$(FM_TEST_CURL_BODY='{"state":"MERGED"}' run_poll "$dir")
+  [ "$out" = merged ] || fail "Bitbucket poll did not read an exported, quoted token from the home .env"
+
+  # An absent curl must produce no wake. The whole search path is mirrored
+  # without it, because a real curl anywhere on PATH would prove nothing.
+  nocurl="$dir/nocurl"
+  mkdir -p "$nocurl"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = curl ] && continue
+      [ -e "$nocurl/$name" ] || ln -s "$entry" "$nocurl/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$nocurl" command -v curl >/dev/null 2>&1 \
+    || fail "the curl-free search path still resolved curl"
+  out=$(FM_TEST_CURL_BODY='{"state":"MERGED"}' PATH="$nocurl" bash "$state/task-a.check.sh")
+  [ -z "$out" ] || fail "Bitbucket poll emitted with curl absent from PATH"
+
+  # Arming is the one place a missing dependency or credential can be reported,
+  # so it refuses there instead of arming a watch that can never fire.
+  write_task_meta "$dir" task-b
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$nocurl" \
+    "$PR_CHECK" task-b "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a Bitbucket watch succeeded with curl absent"
+  case "$out" in
+    *"requires curl on PATH"*) ;;
+    *) fail "arming a Bitbucket watch with curl absent did not report the missing dependency" ;;
+  esac
+  [ ! -e "$state/task-b.check.sh" ] || fail "refused Bitbucket arming left a poll armed"
+
+  # A home whose .env carries no token, with none in the environment either. The
+  # home itself stays valid so this exercises the credential refusal rather than
+  # the earlier metadata check.
+  write_task_meta "$dir" task-c
+  rm -f "$dir/home/.env"
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_CURL_LOG="$dir/curl.log" \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    env -u BITBUCKET_PAT "$PR_CHECK" task-c "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a Bitbucket watch succeeded with no credential"
+  [ ! -e "$state/task-c.check.sh" ] || fail "refused Bitbucket arming left a poll armed"
+  case "$out" in
+    *"Personal Access Token"*) ;;
+    *) fail "arming a Bitbucket watch with no credential did not name the missing token" ;;
+  esac
+
+  pass "Bitbucket pull requests are followed on any instance and never wake falsely"
+}
+
 seed_canonical_poll() {
   local dir=$1 id=$2 url=$3 template=${4:-$POLL} state provider host path number
   state="$dir/home/state"
@@ -3392,3 +3599,4 @@ test_bootstrap_isolates_incomplete_poll_migration
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
+test_bitbucket_merge_watch

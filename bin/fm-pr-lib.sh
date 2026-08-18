@@ -156,15 +156,65 @@ fm_pr_gitlab_path_valid() {
   done
 }
 
+# Bitbucket Server and Data Center are self-hosted only, so the host is part of
+# the identity exactly as it is for GitLab. github.com is refused for the same
+# reason it is there: it is never a Bitbucket instance, so a URL carrying that
+# host can only be a typo or a spoof and must not be armed as a watch that can
+# never succeed.
+fm_pr_bitbucket_host_valid() {
+  local host=${1-} label
+  local LC_ALL=C
+  local -a labels
+  [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || return 1
+  [ "$host" != github.com ] || return 1
+  case "$host" in
+    .*|*.|*..*|*[!a-z0-9.-]*) return 1 ;;
+  esac
+  IFS=. read -ra labels <<< "$host"
+  for label in "${labels[@]}"; do
+    [ "${#label}" -ge 1 ] && [ "${#label}" -le 63 ] || return 1
+    case "$label" in
+      -*|*-) return 1 ;;
+    esac
+  done
+}
+
+# A Bitbucket Server repository is addressed by exactly two components, a project
+# key and a repository slug, so the stored path is always "<key>/<slug>" and never
+# nests the way a GitLab namespace does. A personal project is spelled "~<user>",
+# which is why the leading tilde is accepted for the key and only there.
+fm_pr_bitbucket_key_valid() {
+  local key=${1-}
+  local LC_ALL=C
+  [ "${#key}" -ge 1 ] && [ "${#key}" -le 128 ] || return 1
+  case "$key" in
+    '~') return 1 ;;
+    '~'*) key=${key#'~'} ;;
+  esac
+  case "$key" in
+    ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
+fm_pr_bitbucket_slug_valid() {
+  local slug=${1-}
+  local LC_ALL=C
+  [ "${#slug}" -ge 1 ] && [ "${#slug}" -le 128 ] || return 1
+  case "$slug" in
+    .|..|*.git|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
 # Parse a canonical PR or MR URL into the provider-tagged identity. Validation
 # is strict and per provider: the GitHub username and repository rules are
 # unchanged, and GitLab gets its own host and namespace rules rather than a
 # loosened GitHub rule.
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github because
-# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
-# them empty; teaching the merge path about GitLab is a separate change, and
-# until then it refuses a GitLab URL rather than merging anything.
+# bin/fm-pr-merge.sh addresses GitHub by owner/repository. They stay empty for
+# every other provider: a bitbucket merge derives its project key and repository
+# slug from the two path components, and a gitlab URL is still refused by the
+# merge path rather than merged, because teaching it GitLab is a separate change.
 fm_pr_url_parse() {
   local raw=${1-} pattern host path
   local LC_ALL=C
@@ -191,6 +241,29 @@ fm_pr_url_parse() {
     FM_PR_NUMBER=${BASH_REMATCH[3]}
     return 0
   fi
+  # Bitbucket Server and Data Center. The web UI appends a view segment
+  # (/overview, /diff, /commits, /activity) to the URL the captain copies, so it
+  # is accepted and dropped: FM_PR_URL is the canonical form every consumer
+  # reconstructs from the stored parts, and bin/fm-pr-check.sh records that
+  # canonical URL rather than the raw one.
+  #
+  # Bitbucket CLOUD is deliberately not matched. Its URL carries no
+  # /projects/<key>/repos/<slug> pair, and its API is a different version with a
+  # different credential, so a cloud URL falls through to a refusal instead of
+  # being armed against a Server endpoint that does not exist.
+  pattern='^https://([a-z0-9.-]{1,253})/projects/([^/]+)/repos/([^/]+)/pull-requests/([1-9][0-9]*)(/(overview|diff|commits|activity))?$'
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    fm_pr_bitbucket_host_valid "$host" || return 1
+    fm_pr_bitbucket_key_valid "${BASH_REMATCH[2]}" || return 1
+    fm_pr_bitbucket_slug_valid "${BASH_REMATCH[3]}" || return 1
+    FM_PR_PROVIDER=bitbucket
+    FM_PR_HOST=$host
+    FM_PR_PATH="${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
+    FM_PR_NUMBER=${BASH_REMATCH[4]}
+    FM_PR_URL="https://$host/projects/${BASH_REMATCH[2]}/repos/${BASH_REMATCH[3]}/pull-requests/$FM_PR_NUMBER"
+    return 0
+  fi
   # The path class contains "/" and "-", so this match is greedy to the last
   # "/-/merge_requests/". Any earlier separator therefore lands inside the
   # captured path, where the reserved "-" segment is refused.
@@ -205,6 +278,33 @@ fm_pr_url_parse() {
   FM_PR_HOST=$host
   FM_PR_PATH=$path
   FM_PR_NUMBER=${BASH_REMATCH[3]}
+}
+
+# Echo the Bitbucket Server credential for <home>, or return 1 when there is
+# none. Environment first, then the home's gitignored .env, which is where the
+# relay pairing token already lives. The file is read with sed and never sourced,
+# so nothing in it is executed.
+#
+# bin/fm-pr-poll.sh re-implements this inline on purpose. That program is
+# deliberately byte-identical for every task and sources nothing, which is the
+# same reason it re-validates each identity component instead of calling the
+# validators above. This copy exists so ARMING can refuse a watch that could
+# never fire, which is the one moment a missing credential can be reported.
+fm_pr_bitbucket_token() { # <home>
+  local home=${1-} env_file token
+  token=${BITBUCKET_PAT:-}
+  if [ -z "$token" ] && [ -n "$home" ]; then
+    env_file="$home/.env"
+    if [ -f "$env_file" ] && [ ! -L "$env_file" ]; then
+      token=$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}BITBUCKET_PAT=//p' "$env_file" | head -1) || token=
+      token=${token%\"}
+      token=${token#\"}
+      token=${token%\'}
+      token=${token#\'}
+    fi
+  fi
+  [ -n "$token" ] || return 1
+  printf '%s\n' "$token"
 }
 
 fm_pr_head_valid() {

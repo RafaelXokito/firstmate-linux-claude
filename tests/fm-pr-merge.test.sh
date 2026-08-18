@@ -14,6 +14,12 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) a Bitbucket PR is merged through REST 1.0 with the version read first
+#   (j) a Bitbucket PR already merged, declined, or of unreadable version is
+#       refused without ever sending the merge
+#   (k) a Bitbucket merge that does not report MERGED is a failure, never an
+#       assumed success
+#   (l) a Bitbucket merge refuses extra args and a missing credential
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -82,6 +88,40 @@ SH
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# curl mock for the Bitbucket REST path, reproducing the two calls the merge
+# makes: a GET that carries the pull request's current version, then a POST to
+# the merge endpoint. Each invocation is recorded so the test can assert that no
+# merge was sent when one had to be refused.
+add_bitbucket_curl_mock() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_CURL_LOG"
+case " $* " in
+  *" -X POST "*)
+    [ "${FM_TEST_CURL_POST_FAIL:-0}" = 0 ] || exit 1
+    printf '%s' "${FM_TEST_CURL_POST_BODY:-{\"state\":\"MERGED\"\}}"
+    ;;
+  *)
+    [ "${FM_TEST_CURL_GET_FAIL:-0}" = 0 ] || exit 1
+    printf '%s' "${FM_TEST_CURL_GET_BODY:-{\"id\":7,\"version\":3,\"state\":\"OPEN\"\}}"
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/curl"
+}
+
+run_pr_merge_bitbucket() {
+  local case_dir=$1; shift
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$case_dir" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_CURL_LOG="$case_dir/curl.log" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$PR_MERGE" "$@"
 }
 
 run_pr_merge() {
@@ -301,6 +341,121 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+
+BB_URL=https://bb.example/projects/KEY/repos/repo/pull-requests/7
+
+# Build a Bitbucket case: gh mocks for the shared recording step, a curl mock for
+# the REST path, and a token in the home's .env. BITBUCKET_PAT is unset for the
+# whole family so a real token on the operator's shell cannot make the
+# no-credential case vacuous.
+make_bitbucket_case() {
+  local name=$1 case_dir
+  case_dir=$(make_case "$name")
+  add_gh_mocks "$case_dir" 0123456789abcdef0123456789abcdef01234567
+  add_bitbucket_curl_mock "$case_dir"
+  printf 'BITBUCKET_PAT=fixture-token\n' > "$case_dir/.env"
+  : > "$case_dir/curl.log"
+  printf '%s\n' "$case_dir"
+}
+
+test_bitbucket_merges_through_rest_with_version() {
+  local case_dir out
+  unset BITBUCKET_PAT
+  case_dir=$(make_bitbucket_case bitbucket-merge)
+  out=$(run_pr_merge_bitbucket "$case_dir" task-x1 "$BB_URL") \
+    || fail "a Bitbucket merge that reported MERGED did not succeed"
+  assert_contains "$out" "merged $BB_URL" "a successful Bitbucket merge must report the merged PR"
+
+  # Recording still happens before the merge, so teardown has a PR to verify.
+  assert_grep "pr=$BB_URL" "$case_dir/state/task-x1.meta" \
+    "a Bitbucket merge must record pr= before merging"
+
+  # The version read must precede the merge, and the merge must carry exactly
+  # that version: it is Bitbucket's optimistic lock, not decoration.
+  assert_grep "https://bb.example/rest/api/1.0/projects/KEY/repos/repo/pull-requests/7" \
+    "$case_dir/curl.log" "the merge must address the REST endpoint from the URL"
+  assert_grep "pull-requests/7/merge?version=3" "$case_dir/curl.log" \
+    "the merge must pass the version read from the pull request"
+  [ "$(grep -c 'X POST' "$case_dir/curl.log")" = 1 ] \
+    || fail "a Bitbucket merge must send exactly one merge request"
+
+  # The GitHub CLI is never reached for a Bitbucket URL.
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "a Bitbucket merge must not reach the GitHub merge CLI"
+
+  pass "fm-pr-merge: a Bitbucket PR is merged through REST 1.0 with the version read first"
+}
+
+test_bitbucket_refuses_without_sending_merge() {
+  local case_dir rc row body expect
+  unset BITBUCKET_PAT
+  while IFS='|' read -r row body expect; do
+    [ -n "$row" ] || continue
+    case_dir=$(make_bitbucket_case "bitbucket-refuse-$row")
+    set +e
+    out=$(FM_TEST_CURL_GET_BODY="$body" run_pr_merge_bitbucket "$case_dir" task-x1 "$BB_URL" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "a Bitbucket merge succeeded for the $row case"
+    assert_contains "$out" "$expect" "the $row refusal must say why"
+    assert_no_grep 'X POST' "$case_dir/curl.log" \
+      "the $row case must never send a merge"
+  done <<'EOF'
+merged|{"id":7,"version":3,"state":"MERGED"}|already merged
+declined|{"id":7,"version":3,"state":"DECLINED"}|declined
+noversion|{"id":7,"state":"OPEN"}|version
+errorpage|<html>500</html>|version
+EOF
+  pass "fm-pr-merge: an already merged, declined, or unreadable Bitbucket PR is refused before any merge"
+}
+
+test_bitbucket_unconfirmed_merge_is_a_failure() {
+  local case_dir rc out
+  unset BITBUCKET_PAT
+  case_dir=$(make_bitbucket_case bitbucket-unconfirmed)
+  set +e
+  out=$(FM_TEST_CURL_POST_BODY='{"errors":[{"message":"merge conflict"}]}' \
+    run_pr_merge_bitbucket "$case_dir" task-x1 "$BB_URL" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a Bitbucket merge that did not report MERGED was treated as success"
+  assert_contains "$out" "nothing is assumed merged" \
+    "an unconfirmed Bitbucket merge must say nothing is assumed merged"
+
+  case_dir=$(make_bitbucket_case bitbucket-post-fails)
+  set +e
+  out=$(FM_TEST_CURL_POST_FAIL=1 run_pr_merge_bitbucket "$case_dir" task-x1 "$BB_URL" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a failed Bitbucket merge transport was treated as success"
+
+  pass "fm-pr-merge: a Bitbucket merge that is not confirmed MERGED fails instead of assuming success"
+}
+
+test_bitbucket_refuses_extra_args_and_missing_token() {
+  local case_dir rc out
+  unset BITBUCKET_PAT
+  case_dir=$(make_bitbucket_case bitbucket-extra-args)
+  set +e
+  out=$(run_pr_merge_bitbucket "$case_dir" task-x1 "$BB_URL" -- --rebase 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "a Bitbucket merge accepted extra merge arguments"
+  assert_contains "$out" "no extra merge arguments" "the refusal must name the unsupported arguments"
+
+  case_dir=$(make_bitbucket_case bitbucket-no-token)
+  rm -f "$case_dir/.env"
+  set +e
+  out=$(run_pr_merge_bitbucket "$case_dir" task-x1 "$BB_URL" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a Bitbucket merge succeeded with no credential"
+  assert_contains "$out" "Personal Access Token" "the refusal must name the missing token"
+  assert_no_grep 'X POST' "$case_dir/curl.log" "a credential-less merge must send nothing"
+
+  pass "fm-pr-merge: a Bitbucket merge refuses extra arguments and a missing credential"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -311,3 +466,7 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_bitbucket_merges_through_rest_with_version
+test_bitbucket_refuses_without_sending_merge
+test_bitbucket_unconfirmed_merge_is_a_failure
+test_bitbucket_refuses_extra_args_and_missing_token

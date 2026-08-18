@@ -20,6 +20,9 @@ It does not replace `secondmate-provisioning`, which owns project clones inside 
 ## Preconditions and registry
 
 Projects live flat under `projects/`, and `data/projects.md` is the private fleet registry.
+In a PER-PROJECT home that `projects/` directory holds exactly one entry, a symlink back to the enclosing checkout, and the registry holds that one project.
+Such a home is created and repaired only through `bin/fm-project-home.sh`, whose header owns every created path; never hand-build one, and never add a second project to it - route work for another project to that project's own home instead.
+The captain's own entry point is `bin/fm-launch.sh`, so a captain asking to "set firstmate up in this project" wants `fm init` there rather than a clone into this home.
 Use the registry format and parser contract owned by the header of `bin/fm-project-mode.sh`.
 Keep each registry description useful for identifying the project, but keep delivery posture, captain-private state, and detailed project knowledge in their existing designated homes.
 Do not turn the registry into project documentation.
@@ -56,6 +59,7 @@ Default it off for every project and every posture, and enable it only on the ca
 
 Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
+In a per-project home there is nothing to clone: the project is already there, so adding it means running `bin/fm-project-home.sh init` in that checkout and confirming the posture it records.
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.

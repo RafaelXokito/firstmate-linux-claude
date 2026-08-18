@@ -59,7 +59,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 ### Requirements
 
 - A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Codex, OpenCode, or Cursor Agent CLI.
-- Git and the GitHub CLI, authenticated through `gh auth login`.
+- Git, plus the CLI for whichever forges your projects live on: the GitHub CLI authenticated through `gh auth login` for GitHub, `glab` for GitLab, and `curl` with a Personal Access Token for Bitbucket Server. Only the forges your projects actually use are required.
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
 
 The first mate detects and offers to install supported missing tools after you approve.
@@ -79,9 +79,9 @@ Launch it with `--trust`, or none of its project hooks load; it also has no turn
 ### Install and launch
 
 ```sh
-gh auth login
 git clone https://github.com/kunchenguid/firstmate
 cd firstmate
+gh auth login   # only if your projects live on GitHub
 ```
 
 Then launch one of the co-primary harnesses; AGENTS.md takes over from there:
@@ -127,6 +127,22 @@ The preference persists for the effective Firstmate home, and toggling it off re
 
 > alright merge it
 ```
+
+### One home per project
+
+By default the clone above is the home, and projects are cloned into its `projects/` directory.
+If you would rather keep the first mate inside each project, install the `fm` launcher once and give a project its own home:
+
+```sh
+bin/fm-launch.sh alias          # installs `fm` into ~/.local/bin
+cd ~/work/your-project
+fm init --mode direct-PR        # creates ./.firstmate, hidden from your repo's git
+fm                              # starts the harness in that project's own home
+```
+
+One shared clone keeps serving every home, so a single `/updatefirstmate` still updates them all.
+`fm status` prints which home, code root, and project the current directory resolves to, and `fm run <script>` runs one tracked `bin/` script against that home.
+The [operational home layout](docs/configuration.md#operational-home-layout-and-state) section describes both layouts and what each one creates.
 
 ### More backends
 

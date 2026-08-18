@@ -217,6 +217,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/bitbucket-merge-watch.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/calm-mode-feasibility.md",
       "audience": "maintainer-verification"
     },
