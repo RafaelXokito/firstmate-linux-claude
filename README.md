@@ -142,6 +142,8 @@ fm                              # starts the harness in that project's own home
 
 One shared clone keeps serving every home, so a single `/updatefirstmate` still updates them all.
 `fm status` prints which home, code root, and project the current directory resolves to, and `fm run <script>` runs one tracked `bin/` script against that home.
+
+[Per-project setup](docs/per-project-setup.md) is the full procedure: choosing a delivery mode, supplying a forge credential, confirming the setup took, and retiring a home.
 The [operational home layout](docs/configuration.md#operational-home-layout-and-state) section describes both layouts and what each one creates.
 
 ### More backends

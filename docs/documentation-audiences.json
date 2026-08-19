@@ -24,14 +24,15 @@
     "operator-example"
   ],
   "readmeSetupTargets": [
-    "docs/configuration.md",
-    "docs/wedge-alarm.md",
-    "docs/tmux-backend.md",
-    "docs/herdr-backend.md",
-    "docs/zellij-backend.md",
-    "docs/orca-backend.md",
     "docs/cmux-backend.md",
-    "docs/remote-secondmates.md"
+    "docs/configuration.md",
+    "docs/herdr-backend.md",
+    "docs/orca-backend.md",
+    "docs/per-project-setup.md",
+    "docs/remote-secondmates.md",
+    "docs/tmux-backend.md",
+    "docs/wedge-alarm.md",
+    "docs/zellij-backend.md"
   ],
   "requiredOwnerPointers": [
     {
@@ -278,6 +279,10 @@
     },
     {
       "path": "docs/orca-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/per-project-setup.md",
       "audience": "operator-current"
     },
     {
