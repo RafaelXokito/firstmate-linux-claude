@@ -60,8 +60,20 @@ test_init_shape() {
     [ -d "$home/$d" ] || fail "init must create $d/"
   done
 
-  [ -L "$home/AGENTS.md" ] || fail "AGENTS.md must be a symlink to the shared contract"
-  [ "$(readlink "$home/AGENTS.md")" = "$ROOT/AGENTS.md" ] || fail "AGENTS.md must point at the shared clone"
+  # THE load-bearing invariant. CLAUDE.md reaches the contract through a memory
+  # import, and an import whose target resolves outside the harness project
+  # directory is silently skipped: the contract never loads, nothing is reported,
+  # and the session looks like an ordinary one that happened to run firstmate's
+  # startup digest. So the contract must be a real file INSIDE the home, never a
+  # symlink escaping it.
+  [ -L "$home/AGENTS.md" ] && fail "AGENTS.md must not be a symlink; an import target outside the home is silently skipped"
+  [ -f "$home/AGENTS.md" ] || fail "AGENTS.md must be a real file inside the home"
+  case "$(readlink -f "$home/AGENTS.md")" in
+    "$home"/*) ;;
+    *) fail "the contract must resolve INSIDE the home, got $(readlink -f "$home/AGENTS.md")" ;;
+  esac
+  assert_grep "You are the first mate" "$home/AGENTS.md" "the generated contract must carry the shared contract's text"
+  assert_grep "Generated copy of" "$home/AGENTS.md" "the generated contract must say where to edit it instead"
   [ -L "$home/.claude/skills" ] || fail ".claude/skills must be a symlink to the shared skills"
 
   # The one projects/ entry is a back-link to the enclosing checkout, so every
@@ -137,18 +149,32 @@ test_init_converges() {
   printf 'captain note\n' > "$home/data/captain.md"
   printf 'running: work\n' > "$home/state/t1.status"
 
-  # Drift: a symlink aimed at the wrong place, and a stale generated hook config.
+  # Drift: a legacy symlink where the generated contract belongs - the exact shape
+  # a home created before that fix carries - plus a stale generated hook config.
   ln -sfn /nonexistent/AGENTS.md "$home/AGENTS.md"
   printf 'stale\n' > "$home/.claude/settings.json"
 
   before=$(cat "$home/data/projects.md")
   "$HOMESH" init "$proj" >/dev/null 2>&1 || fail "re-init failed"
 
-  [ "$(readlink "$home/AGENTS.md")" = "$ROOT/AGENTS.md" ] || fail "re-init must repair a drifted symlink"
+  # Converging a legacy symlinked home must leave a real in-home contract behind.
+  [ -L "$home/AGENTS.md" ] && fail "re-init must replace a legacy contract symlink with a real file"
+  assert_grep "You are the first mate" "$home/AGENTS.md" "re-init must regenerate the contract copy"
+  case "$(readlink -f "$home/AGENTS.md")" in
+    "$home"/*) ;;
+    *) fail "re-init must leave the contract resolving inside the home" ;;
+  esac
   assert_grep "captain note" "$home/data/captain.md" "re-init must never remove captain data"
   assert_grep "running: work" "$home/state/t1.status" "re-init must never remove runtime state"
   after=$(cat "$home/data/projects.md")
   [ "$before" = "$after" ] || fail "re-init must not rewrite an existing registry"
+
+  # A contract copy that fell behind the shared clone must be refreshed, or a home
+  # would silently keep running last week's rules.
+  printf 'outdated\n' > "$home/AGENTS.md"
+  "$HOMESH" init "$proj" >/dev/null 2>&1 || fail "re-init failed"
+  assert_grep "You are the first mate" "$home/AGENTS.md" "re-init must refresh a stale contract copy"
+  assert_no_grep "outdated" "$home/AGENTS.md" "re-init must not leave stale contract bytes behind"
 
   # The generated hook config addresses the shared clone, never the home, because
   # $CLAUDE_PROJECT_DIR resolves to the home when the harness runs there.

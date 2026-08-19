@@ -18,6 +18,8 @@ A home can sit in either of two places, and both use the same directories and th
 In the CLASSIC layout the tracked clone is also the home, and each project is cloned into its `projects/` directory.
 In the PER-PROJECT layout the home is `<project>/.firstmate` inside a project checkout, one shared tracked clone serves every such home, and that home's `projects/` holds a single symlink back to the enclosing checkout.
 [`bin/fm-project-home.sh`](../bin/fm-project-home.sh) owns the per-project home's created child paths and its convergence mechanics, including how the home is kept out of the project's git and why it deliberately has no `bin/` symlink.
+The shared contract is COPIED into each home rather than linked, and refreshed on every converge, because the harness reaches it through a memory import and an import whose target resolves outside the harness project directory is silently skipped: the contract never loads, nothing is reported, and the session behaves like an ordinary one that merely ran firstmate's startup digest.
+`bin/fm-launch.sh` converges on every start, so a shared-clone update reaches every home without a separate step.
 [`bin/fm-launch.sh`](../bin/fm-launch.sh) is the operator entry point that resolves which layout serves the working directory and exports `FM_HOME` together with `FM_ROOT_OVERRIDE`; see "FM_HOME" below for what each variable selects.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.

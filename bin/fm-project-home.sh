@@ -18,7 +18,15 @@
 #   .fm-project-home  marker: "project=<abs>", "root=<abs>", "name=<name>"; the
 #                     one file that identifies a per-project home, and the anchor
 #                     bin/fm-launch.sh searches upward for
-#   AGENTS.md         symlink to $FM_ROOT/AGENTS.md
+#   AGENTS.md         GENERATED copy of $FM_ROOT/AGENTS.md, refreshed on every
+#                     converge. It is a real file and NOT a symlink on purpose:
+#                     CLAUDE.md reaches it through a memory import, and an import
+#                     whose target resolves OUTSIDE the harness project directory
+#                     is silently skipped - the contract never loads, no
+#                     diagnostic is printed, and the session behaves like an
+#                     ordinary one that merely ran firstmate's startup digest.
+#                     Keeping the target inside the home removes that failure
+#                     mode entirely; convergence is what keeps the copy honest.
 #   CLAUDE.md         "@AGENTS.md" pointer, so a harness whose cwd is this home
 #                     loads the shared contract, and still inherits the
 #                     project's own CLAUDE.md from the parent directory
@@ -42,9 +50,11 @@
 # project's git through .git/info/exclude, which is local and untracked, so
 # nothing lands in the captain's repository and no tracked .gitignore is edited.
 #
-# init is idempotent and convergent: it repairs a drifted symlink, a stale
-# generated hook config, and a missing exclude entry, and rewrites the marker's
-# root= when the shared clone moved. It never removes data/, state/, or config/.
+# init is idempotent and convergent: it refreshes the generated contract copy and
+# hook config, repairs a drifted symlink, restores a missing exclude entry, and
+# rewrites the marker's root= when the shared clone moved. bin/fm-launch.sh runs
+# it on every start, so a shared-clone update reaches every home without a
+# separate step. It never removes data/, state/, or config/.
 #
 # Usage: fm-project-home.sh init [<project-dir>] [--name <name>] [--mode <mode>] [--yolo on|off]
 #        fm-project-home.sh path [<start-dir>]     print the enclosing home, or exit 1
@@ -131,9 +141,12 @@ converge_symlink() { # <link> <target>
 }
 
 # Write stdin to <dest> only when the content differs, so an unchanged converge
-# run does not churn mtimes that other guards read.
+# run does not churn mtimes that other guards read. A pre-existing symlink at
+# <dest> is replaced, which is how a home created before the generated-contract
+# fix converges forward.
 write_if_changed() { # <dest> <<content
   local dest=$1 tmp
+  [ -L "$dest" ] && rm -f "$dest"
   tmp=$(mktemp "$dest.XXXXXX") || return 1
   cat > "$tmp"
   if [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then
@@ -196,7 +209,14 @@ cmd_init() {
 
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects" "$home/.claude"
 
-  converge_symlink "$home/AGENTS.md" "$FM_ROOT/AGENTS.md" || exit 1
+  # The contract is COPIED, not linked: see the header. CLAUDE.md imports it, and
+  # an import target outside the harness project directory is silently skipped.
+  [ -f "$root_abs/AGENTS.md" ] || die "the shared clone has no AGENTS.md: $root_abs"
+  {
+    printf '%s\n' "<!-- Generated copy of $root_abs/AGENTS.md - edit that file, not this one."
+    printf '%s\n' "     Refreshed on every 'fm init' and every 'fm' launch. -->"
+    cat "$root_abs/AGENTS.md"
+  } | write_if_changed "$home/AGENTS.md"
   converge_symlink "$home/.claude/skills" "$FM_ROOT/.agents/skills" || exit 1
   converge_symlink "$home/projects/$name" "../.." || exit 1
 
