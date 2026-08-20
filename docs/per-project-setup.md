@@ -49,6 +49,12 @@ It is idempotent, so rerunning it repairs a drifted home rather than complaining
 `fm` then starts the harness in that home.
 Set `FM_LAUNCH_CMD` when the harness is not `claude`.
 
+Every `fm init` and every `fm` launch converges the home's host config for each supported primary harness, not only the one you are about to start.
+Each harness reaches firstmate through its own file - `.claude/settings.json`, `.cursor/hooks.json`, `.codex/hooks.json`, `.grok/hooks/`, `.opencode/plugins/`, `.pi/extensions/` - and in a per-project home the directory the harness treats as the project is the home itself, which has no `bin/` of its own.
+The converged copy names the shared clone by absolute path instead, so the hooks run from the code root.
+This matters because these hosts fail quietly when that path is wrong: the codex and grok entries check themselves and exit, and the opencode plugin discards its own launch error, so a misaddressed config produces a session with no supervision and no warning.
+[`bin/fm-project-home.sh`](../bin/fm-project-home.sh) owns the per-host table and the two mechanisms it uses.
+
 ### Always pass an explicit mode
 
 Omitting `--mode` seeds an entry that resolves to `no-mistakes`, the most rigorous path, which also expects the validation pipeline to be initialized in that project.

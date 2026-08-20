@@ -172,6 +172,60 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
+## Per-project home host configs
+
+A per-project home (`<project>/.firstmate`) makes the HOME the directory each harness treats as its project, so every host config must be converged to name the shared clone by absolute path instead.
+[`bin/fm-project-home.sh`](../../bin/fm-project-home.sh) owns the per-host table and the two mechanisms; this record holds only the evidence.
+
+Two different claims are involved, and they are verified differently.
+
+**The convergence itself is deterministic and covered portably.**
+It needs no harness, and CI enforces it:
+
+```sh
+tests/fm-project-home.test.sh
+```
+
+Verified on 2026-08-20 from a primary checkout on Linux 6.8.0-138-generic:
+
+```text
+ok - fm-project-home: every harness host config in the home addresses the shared clone
+ok - fm-project-home: opencode plugins resolve firstmate's bin/ through FM_ROOT_OVERRIDE
+ok - fm-project-home: init converges drift and preserves data, state, and the registry
+```
+
+The first case drives the whole host matrix and fails if it matches nothing, so it cannot pass vacuously when a host config is missing from the clone.
+The suite must run from a primary checkout: it asserts the shared-clone and linked-worktree refusals, and a linked worktree hits the worktree refusal first.
+
+**Whether each harness then LOADS its converged config is a vendor behavior, and is verified per harness.**
+That claim is inherited from the tracked host config each harness already shipped; what a per-project home changes is only the path inside it.
+Status on 2026-08-20:
+
+| Harness | Host config | Mechanism | Loads it from a per-project home |
+| --- | --- | --- | --- |
+| claude | `.claude/settings.json` | substituted | verified in daily operation |
+| opencode | `.opencode/plugins/` | linked, `FM_ROOT_OVERRIDE` | plugin root precedence verified portably; live load not re-run |
+| codex | `.codex/hooks.json` | substituted | NOT VERIFIED - harness absent |
+| cursor | `.cursor/hooks.json` | substituted | NOT VERIFIED - harness absent |
+| grok | `.grok/hooks/*.json` | substituted | NOT VERIFIED - harness absent |
+| pi | `.pi/extensions/` | linked, `FM_ROOT_OVERRIDE` | NOT VERIFIED - harness absent |
+
+Harnesses absent from the machine this was recorded on, and therefore unverified above: codex, cursor, grok, pi, kimi.
+The convergence is implemented for all of them and is portably covered; only the vendor-side load is unproven.
+
+Close a NOT VERIFIED row by installing that harness and running its own live guard from a per-project home rather than a shared clone:
+
+```sh
+FM_SESSIONSTART_HOOK_LIVE_E2E=1 tests/fm-sessionstart-hook-live-e2e.test.sh   # claude, codex, pi
+FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh
+FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh
+FM_GROK_STOP_LIVE_E2E=1 tests/fm-grok-stop-live-e2e.test.sh
+FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh
+FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
+```
+
+Treat a row as verified only after the guard reports that harness by name; those guards report an absent harness explicitly rather than passing over it.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
