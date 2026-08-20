@@ -15,7 +15,12 @@ type LockOwnership = "owned" | "missing" | "other";
 
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
-const root = resolve(extensionDir, "../..");
+const derivedRoot = resolve(extensionDir, "../..");
+// A per-project home links .pi/extensions into the shared clone, so the derived
+// root already resolves there through the module realpath. FM_ROOT_OVERRIDE,
+// exported by bin/fm-launch.sh, states it outright rather than depending on that
+// resolution; same precedence as fm-primary-pi-watch.ts.
+const root = process.env.FM_ROOT_OVERRIDE || derivedRoot;
 const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const marker = `${state}/.pi-turnend-extension-loaded`;

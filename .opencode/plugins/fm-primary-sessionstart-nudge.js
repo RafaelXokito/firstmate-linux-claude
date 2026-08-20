@@ -33,7 +33,14 @@ async function resolveRoot(anchor) {
 }
 
 export const FmPrimarySessionstartNudge = async ({ client, directory, worktree }) => {
-  const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
+  const derived = worktree ? resolvePath(worktree) : await resolveRoot(directory);
+  // In a per-project firstmate home the project directory OpenCode reports is
+  // the HOME, which has no bin/ of its own, so the derived root would aim every
+  // spawn at a path that does not exist - and this plugin swallows that spawn
+  // error, so the guard would simply go quiet. bin/fm-launch.sh exports
+  // FM_ROOT_OVERRIDE to name the shared clone; same precedence as
+  // fm-primary-watch-arm.js's effectivePaths().
+  const root = process.env.FM_ROOT_OVERRIDE || derived;
 
   return {
     event: async ({ event }) => {
