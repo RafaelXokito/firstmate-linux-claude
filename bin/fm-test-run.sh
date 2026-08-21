@@ -915,12 +915,18 @@ families_for_changed_path() {
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .cursor/hooks.json|.grok/hooks/*|.opencode/plugins/*|\
-    .pi/extensions/*)
+    .pi/extensions/fm-primary-turnend-guard.ts)
       # Every primary host-config surface. bin/fm-project-home.sh copies or links
       # each of these into a per-project home, so a change here also changes what
       # that home hands its harness. The run tier's two harness-supplied facts
       # (source vocabulary and context-reset stdout injection) only show up
       # against a real harness.
+      #
+      # .pi/extensions is listed PER FILE, never as a glob: the first matching
+      # case branch wins, so `.pi/extensions/*` here also swallowed
+      # fm-primary-pi-watch.ts and silently dropped its watcher coverage.
+      # .grok/hooks and .opencode/plugins are safe as globs because no other
+      # branch claims them.
       printf '%s\n' session-bootstrap
       printf '%s\n' live-harness-optin
       ;;
