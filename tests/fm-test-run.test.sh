@@ -363,7 +363,7 @@ test_exclude_family() {
 test_coverage_guard_is_locale_independent() {
   local loc out rc checked=0
   for loc in C en_US.UTF-8 pt_PT.UTF-8; do
-    locale -a 2>/dev/null | grep -qiFx "$(printf '%s' "$loc" | tr 'A-Z' 'a-z' | sed 's/utf-8/utf8/')" || continue
+    locale -a 2>/dev/null | grep -qiFx "$(printf '%s' "$loc" | tr '[:upper:]' '[:lower:]' | sed 's/utf-8/utf8/')" || continue
     checked=$((checked + 1))
     out=$(cd "$ROOT" && LC_ALL="$loc" bin/fm-test-run.sh --check-coverage 2>&1) && rc=0 || rc=$?
     [ "$rc" -eq 0 ]       || fail "--check-coverage failed under LC_ALL=$loc (exit $rc): $out"
