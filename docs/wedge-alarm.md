@@ -12,14 +12,28 @@ It lists channel directives, one per non-empty, non-comment line, and every list
 `FM_WEDGE_ALARM_CHANNEL` overrides the file with one directive for focused testing.
 
 - `off` disables every active alert while retaining the durable marker and tmux flash.
-- `auto` or `default` resolves to `osascript` on macOS.
-  Other platforms have no built-in OS channel, so configure `command:` when a durable marker alone is insufficient.
+- `auto` or `default` resolves to `osascript` on macOS and `notify-send` on Linux, in each case only when that binary is present.
+  A platform with neither reachable has no built-in OS channel, so configure `command:` when a durable marker alone is insufficient.
 - `osascript` posts a macOS Notification Center banner outside the terminal pane.
 - `herdr` calls `herdr notification show` outside the supervised pane.
+- `notify-send` posts a freedesktop desktop notification at critical urgency, so the banner stays up until it is dismissed.
 - `command:<cmd>` runs `<cmd>` through `sh -c` with the alarm summary as `$1` and on stdin, allowing delivery to a phone or pager service.
 
-An absent `config/wedge-alarm` behaves as `auto`, which is default-on on macOS.
+An absent `config/wedge-alarm` behaves as `auto`, which is default-on wherever a platform notifier is reachable.
 This is deliberate because the alarm fires only after a genuine max-defer wedge and is rate-limited to at most once per max-defer window.
+
+## Why a channel's exit status is not always proof
+
+The channels differ in whether they can be believed.
+
+`notify-send` reports delivery truthfully: it exits non-zero when no notification server can be reached, so its exit status is a real signal.
+
+`herdr notification show` does not.
+It exits 0 even when it declines to display anything, returning `{"reason":"disabled","shown":false}` when notifications are switched off in the herdr config.
+Trusting that status reported a delivered alarm nobody saw, which is precisely the silent success this alarm exists to prevent, so the `herdr` channel reads herdr's own `shown` verdict and treats anything else as a failed channel, logging herdr's reason.
+
+Prefer listing more than one channel when a wedge must not be missed.
+Every listed channel fires independently and best-effort, so a channel that turns out to be unreachable does not suppress the others.
 
 Each channel is best-effort.
 A missing binary or non-zero exit logs a warning and continues to the next channel without crashing the daemon loop.

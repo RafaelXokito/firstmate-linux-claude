@@ -490,4 +490,41 @@ Observed output:
 {"id":"cli:notification:show","result":{"reason":"shown","shown":true,"type":"notification_show"}}
 ```
 
+### Linux notify-send channel and the herdr disabled case, 2026-08-21
+
+Verified on Linux 6.8.0-138-generic with GNOME Shell 46.0 serving `org.freedesktop.Notifications`, and Herdr 0.8.x.
+
+`notify-send` reports delivery truthfully, which is why the `notify-send` channel needs no verdict parse beyond its exit status:
+
+```sh
+notify-send -u low -a firstmate 'fm probe control' 'ignore me'; echo "exit=$?"
+env DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent notify-send 'fm probe' 'should fail'; echo "exit=$?"
+```
+
+Observed output:
+
+```text
+exit=0
+Could not connect: No such file or directory
+exit=1
+```
+
+`herdr notification show` does NOT report delivery through its exit status. With notifications disabled in the herdr config:
+
+```sh
+herdr notification show 'firstmate wedge alarm test' --body 'safe to ignore' --sound request; echo "exit=$?"
+```
+
+Observed output:
+
+```json
+{"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}
+exit=0
+```
+
+That exit 0 with `shown:false` is why the `herdr` channel reads the `shown` verdict rather than the exit status.
+The 2026-07-10 evidence above recorded `shown:true` from the same field, so the verdict is present in both outcomes.
+
+The platform-default resolution and both verdict paths are covered without any real notification by `tests/fm-daemon.test.sh`: `auto` resolving to `notify-send` on Linux, `auto` selecting nothing when that binary is absent or the platform has no supported notifier, a `shown:false` herdr response failing loudly with its reason, a `shown:true` response succeeding, and a non-zero `notify-send` being reported rather than swallowed.
+
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.

@@ -1262,12 +1262,26 @@ SH
 printf '%s\n' osascript >> "${FM_WEDGE_ALARM_REAL_LOG:-/dev/null}"
 exit 0
 SH
+  # herdr exits 0 whether or not it actually displayed anything, so the fake
+  # emits the same JSON shape the real CLI does and FM_FAKE_HERDR_SHOWN drives
+  # the verdict. Default true keeps pre-existing cases behaving as before.
   cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' herdr >> "${FM_WEDGE_ALARM_REAL_LOG:-/dev/null}"
+shown=${FM_FAKE_HERDR_SHOWN:-true}
+if [ "$shown" = true ]; then
+  printf '{"id":"cli:notification:show","result":{"shown":true,"type":"notification_show"}}\n'
+else
+  printf '{"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}\n'
+fi
 exit 0
 SH
-  chmod +x "$fakebin/uname" "$fakebin/osascript" "$fakebin/herdr"
+  cat > "$fakebin/notify-send" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' notify-send >> "${FM_WEDGE_ALARM_REAL_LOG:-/dev/null}"
+exit "${FM_FAKE_NOTIFY_SEND_RC:-0}"
+SH
+  chmod +x "$fakebin/uname" "$fakebin/osascript" "$fakebin/herdr" "$fakebin/notify-send"
   : > "$dir/alert.log"
   printf '%s\n' "$dir"
 }
@@ -1419,13 +1433,103 @@ test_wedge_alarm_auto_darwin_selects_osascript() {
   pass "auto resolves to the macOS osascript notifier on Darwin (default-on)"
 }
 
-test_wedge_alarm_auto_non_darwin_has_no_os_channel() {
+# WHY THIS IS ASSERTED: `auto` used to resolve to NOTHING on Linux, so the
+# alarm built to stop a wedge being invisible was itself silent there. A
+# claude-on-herdr primary hit that twice - 20 escalations buffered 8.5h on
+# 2026-07-10, then 9.4h on 2026-08-20 - because the only remedy was opt-in.
+# Linux now resolves the same way macOS does: use the platform notifier when it
+# is actually present.
+test_wedge_alarm_auto_linux_selects_notify_send() {
   local dir log
   dir=$(make_wedge_case wedge-auto-linux); log="$dir/alert.log"
   PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_FAKE_UNAME=Linux FM_WEDGE_ALARM_CHANNEL=auto \
     wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
-  [ ! -s "$log" ] || fail "auto selected a built-in OS channel on a non-macOS platform: $(cat "$log")"
-  pass "auto on a non-macOS platform selects no built-in OS channel (the marker or a configured command carries it)"
+  grep -F 'notify-send' "$log" >/dev/null \
+    || fail "auto did not resolve to notify-send on Linux: $(cat "$log")"
+  grep -F 'WEDGED 900s' "$log" >/dev/null || fail "the Linux auto channel did not carry the summary"
+  grep -F 'osascript' "$log" >/dev/null && fail "Linux auto also selected the macOS notifier"
+  pass "auto resolves to the notify-send notifier on Linux (default-on, like macOS)"
+}
+
+# The binary really can be absent, and then there is genuinely no OS channel to
+# reach - which must still say so rather than pretending an alert went out.
+test_wedge_alarm_auto_linux_without_notify_send_has_no_os_channel() {
+  local dir log daemon_log
+  dir=$(make_wedge_case wedge-auto-linux-bare); log="$dir/alert.log"; daemon_log="$dir/daemon.log"
+  rm -f "$dir/fakebin/notify-send"
+  PATH="$dir/fakebin:/nonexistent-fm-path" LOG="$daemon_log" FM_WEDGE_ALARM_LOG="$log" \
+    FM_FAKE_UNAME=Linux FM_WEDGE_ALARM_CHANNEL=auto \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  [ ! -s "$log" ] || fail "auto invented an OS channel with no notify-send present: $(cat "$log")"
+  grep -F 'no OS-level alert channel' "$daemon_log" >/dev/null \
+    || fail "an unreachable Linux auto channel did not say the marker is the only signal: $(cat "$daemon_log" 2>/dev/null)"
+  pass "auto on Linux with no notify-send selects no channel and says the marker is the only signal"
+}
+
+# A platform with neither notifier must keep the old honest behavior.
+test_wedge_alarm_auto_unknown_platform_has_no_os_channel() {
+  local dir log
+  dir=$(make_wedge_case wedge-auto-bsd); log="$dir/alert.log"
+  PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_FAKE_UNAME=FreeBSD FM_WEDGE_ALARM_CHANNEL=auto \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  [ ! -s "$log" ] || fail "auto selected a built-in OS channel on an unsupported platform: $(cat "$log")"
+  pass "auto on a platform with no supported notifier selects no built-in OS channel"
+}
+
+test_wedge_alarm_notify_send_channel_selected() {
+  local dir log
+  dir=$(make_wedge_case wedge-notify-send); log="$dir/alert.log"
+  FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=notify-send \
+    wedge_alarm_notify "away-mode escalations WEDGED 650s undelivered - see /s/.marker" "/s/.marker"
+  grep -F 'notify-send' "$log" >/dev/null \
+    || fail "notify-send channel not routed through the notifier seam: $(cat "$log")"
+  grep -F 'WEDGED 650s undelivered' "$log" >/dev/null || fail "notify-send channel did not carry the summary"
+  grep -F 'osascript' "$log" >/dev/null && fail "notify-send-only config also selected osascript"
+  pass "notify-send channel routes through the notifier seam with the summary (never a real notification)"
+}
+
+# THE REGRESSION FOR THE REAL DEFECT. `herdr notification show` exits 0 even when
+# it declined to display anything (notifications disabled in the herdr config),
+# so trusting the exit status reported a delivered alert that nobody ever saw -
+# the same silent success the wedge alarm exists to prevent. The channel must
+# read herdr's own `shown` verdict and fail loudly when it is false.
+test_wedge_alarm_herdr_unshown_is_a_failure() {
+  local dir daemon_log rc
+  dir=$(make_wedge_case wedge-herdr-unshown); daemon_log="$dir/daemon.log"
+  PATH="$dir/fakebin:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' FM_FAKE_HERDR_SHOWN=false \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "herdr reporting shown:false was treated as a delivered notification"
+  grep -F 'did not show' "$daemon_log" >/dev/null \
+    || fail "an unshown herdr notification did not log why: $(cat "$daemon_log" 2>/dev/null)"
+  grep -F 'disabled' "$daemon_log" >/dev/null \
+    || fail "the log did not carry herdr's own reason: $(cat "$daemon_log" 2>/dev/null)"
+  pass "herdr reporting shown:false fails loudly instead of reporting a delivered alert"
+}
+
+test_wedge_alarm_herdr_shown_is_a_success() {
+  local dir daemon_log rc
+  dir=$(make_wedge_case wedge-herdr-shown); daemon_log="$dir/daemon.log"
+  PATH="$dir/fakebin:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' FM_FAKE_HERDR_SHOWN=true \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "herdr reporting shown:true was not accepted as delivered (rc=$rc): $(cat "$daemon_log" 2>/dev/null)"
+  pass "herdr reporting shown:true is accepted as a delivered notification"
+}
+
+# notify-send tells the truth about delivery: it exits non-zero when it cannot
+# reach a notification server, so its exit status is a real signal and a failure
+# must be reported rather than swallowed.
+test_wedge_alarm_notify_send_failure_is_reported() {
+  local dir daemon_log rc
+  dir=$(make_wedge_case wedge-notify-send-fail); daemon_log="$dir/daemon.log"
+  PATH="$dir/fakebin:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' FM_FAKE_NOTIFY_SEND_RC=1 \
+    wedge_alarm_via_notify_send "away-mode WEDGED 900s"
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a failing notify-send was treated as a delivered notification"
+  grep -F 'notify-send notification failed' "$daemon_log" >/dev/null \
+    || fail "a failing notify-send did not log: $(cat "$daemon_log" 2>/dev/null)"
+  pass "a notify-send that cannot reach a notification server is reported, not swallowed"
 }
 
 test_wedge_alarm_config_file_multi_channel() {
@@ -1917,7 +2021,13 @@ test_wedge_alarm_command_failure_hides_configured_command
 test_wedge_alarm_unknown_channel_hides_configured_directive
 test_wedge_alarm_off_disables_active_alert_regardless_of_position
 test_wedge_alarm_auto_darwin_selects_osascript
-test_wedge_alarm_auto_non_darwin_has_no_os_channel
+test_wedge_alarm_auto_linux_selects_notify_send
+test_wedge_alarm_auto_linux_without_notify_send_has_no_os_channel
+test_wedge_alarm_auto_unknown_platform_has_no_os_channel
+test_wedge_alarm_notify_send_channel_selected
+test_wedge_alarm_herdr_unshown_is_a_failure
+test_wedge_alarm_herdr_shown_is_a_success
+test_wedge_alarm_notify_send_failure_is_reported
 test_wedge_alarm_config_file_multi_channel
 test_wedge_alarm_failing_channel_degrades_gracefully
 test_wedge_alarm_hung_channel_times_out_and_falls_through
