@@ -350,6 +350,35 @@ test_exclude_family() {
   pass "exclude-family drops the named primary family after selection"
 }
 
+# The coverage guard compares lists written with `LC_ALL=C sort`, so every
+# comparison must use the same collation. It did not: `comm` ran under the
+# ambient locale, so on any non-C-collation machine it rejected its own sorted
+# input and, under `set -eu`, the unguarded call aborted the whole script. The
+# guard then enforced nothing, tests/fm-test-run.test.sh died 11 of 18 cases in,
+# and every --changed sweep reported a permanent failure - the noise floor a real
+# regression can hide under.
+#
+# Asserted across locales rather than by inspecting the source, and only for
+# locales this machine actually has, so CI never fails on a missing locale.
+test_coverage_guard_is_locale_independent() {
+  local loc out rc checked=0
+  for loc in C en_US.UTF-8 pt_PT.UTF-8; do
+    locale -a 2>/dev/null | grep -qiFx "$(printf '%s' "$loc" | tr 'A-Z' 'a-z' | sed 's/utf-8/utf8/')" || continue
+    checked=$((checked + 1))
+    out=$(cd "$ROOT" && LC_ALL="$loc" bin/fm-test-run.sh --check-coverage 2>&1) && rc=0 || rc=$?
+    [ "$rc" -eq 0 ]       || fail "--check-coverage failed under LC_ALL=$loc (exit $rc): $out"
+    case "$out" in
+      *FM_TEST_COVERAGE\ ok*) ;;
+      *) fail "--check-coverage under LC_ALL=$loc produced no verdict: $out" ;;
+    esac
+    case "$out" in
+      *"not in sorted order"*) fail "--check-coverage under LC_ALL=$loc still compares with the wrong collation: $out" ;;
+    esac
+  done
+  [ "$checked" -gt 1 ]     || fail "only $checked locale(s) available; this case needs at least one non-C locale to mean anything"
+  pass "the coverage guard holds under every installed locale, not only C collation"
+}
+
 test_portable_shard_union_and_coverage_guard() {
   local s1 s2 proven serial herdr all_count union_count overlap out first
   s1=$("$RUNNER" --list --lane portable-parallel-1)
@@ -714,6 +743,7 @@ test_aggregate_exit_behavior
 test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family
+test_coverage_guard_is_locale_independent
 test_portable_shard_union_and_coverage_guard
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_shard_lane_refusals
