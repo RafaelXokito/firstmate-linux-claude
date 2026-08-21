@@ -30,12 +30,24 @@
 #   CLAUDE.md         "@AGENTS.md" pointer, so a harness whose cwd is this home
 #                     loads the shared contract, and still inherits the
 #                     project's own CLAUDE.md from the parent directory
-#   .claude/settings.json  GENERATED from $FM_ROOT/.claude/settings.json with
-#                     $CLAUDE_PROJECT_DIR replaced by the absolute FM_ROOT, so
-#                     every tracked hook runs from the shared clone. It is
-#                     generated rather than symlinked because the hooks resolve
-#                     their scripts relative to the harness project dir, which
-#                     here is the home and not the code root.
+#   <host config>     one entry per supported primary harness, each pointed at
+#                     the shared clone. The harness project dir here is the HOME,
+#                     so a config left as tracked resolves bin/ inside the home,
+#                     where there is none - and every one of these hosts then
+#                     fails SILENTLY. Two mechanisms, by what the host offers:
+#                       SUBSTITUTED, for a declarative config naming its root
+#                       through a placeholder or a cwd expression - copied with
+#                       that root rewritten to the absolute FM_ROOT:
+#                         .claude/settings.json   $CLAUDE_PROJECT_DIR
+#                         .cursor/hooks.json      $CURSOR_PROJECT_DIR
+#                         .codex/hooks.json       root=$(pwd -P)
+#                         .grok/hooks/*.json      ${GROK_WORKSPACE_ROOT:-}
+#                       LINKED, for a plugin or extension that resolves its root
+#                       in executed code and reads FM_ROOT_OVERRIDE, which
+#                       bin/fm-launch.sh exports - the shared directory is
+#                       symlinked and the root comes from the runtime:
+#                         .opencode/plugins       .pi/extensions
+#                     A host the clone does not ship is simply not converged.
 #   .claude/skills    symlink to $FM_ROOT/.agents/skills
 #   data/ state/ config/   this home's private operational directories
 #   projects/<name>   symlink to the enclosing project checkout
@@ -51,7 +63,7 @@
 # nothing lands in the captain's repository and no tracked .gitignore is edited.
 #
 # init is idempotent and convergent: it refreshes the generated contract copy and
-# hook config, repairs a drifted symlink, restores a missing exclude entry, and
+# every harness host config, repairs a drifted symlink, restores a missing exclude entry, and
 # rewrites the marker's root= when the shared clone moved. bin/fm-launch.sh runs
 # it on every start, so a shared-clone update reaches every home without a
 # separate step. It never removes data/, state/, or config/.
@@ -156,6 +168,75 @@ write_if_changed() { # <dest> <<content
   mv -f "$tmp" "$dest"
 }
 
+# Replace every LITERAL occurrence of <find> with <repl> on stdin. Literal and
+# not regex on purpose: the root expressions being rewritten contain $, (, ), {,
+# } and :-, and the replacement is a filesystem path that may carry regex or sed
+# delimiter characters of its own. ENVIRON avoids awk -v's escape processing.
+substitute_literal() { # <find> <repl>
+  FM_FIND=$1 FM_REPL=$2 awk '
+    BEGIN { find = ENVIRON["FM_FIND"]; repl = ENVIRON["FM_REPL"]; n = length(find) }
+    {
+      out = ""
+      while ((i = index($0, find)) > 0) {
+        out = out substr($0, 1, i - 1) repl
+        $0 = substr($0, i + n)
+      }
+      print out $0
+    }
+  '
+}
+
+# Generate <dest> from <src> with the host's own root expression rewritten to the
+# shared clone. A missing <src> is not an error: a clone that does not ship that
+# host's config has nothing to converge.
+generate_host_config() { # <src> <dest> <find> <repl>
+  local src=$1 dest=$2 find=$3 repl=$4
+  [ -f "$src" ] || return 0
+  mkdir -p "$(dirname "$dest")"
+  substitute_literal "$find" "$repl" < "$src" | write_if_changed "$dest"
+}
+
+# Point every supported primary harness's host config at the shared clone. See
+# this script's header for the two mechanisms and the full per-host table.
+#
+# Why every host and not just the one in use: each of these fails SILENTLY when
+# its config resolves bin/ inside the home. The codex and grok entries guard
+# themselves and exit 0, and the opencode plugin swallows its spawn error, so a
+# home converged for one harness only would hand any other harness a session
+# with no supervision and no diagnostic at all.
+# The find arguments below are the hosts' OWN literal root expressions, quoted so
+# this shell does not expand what the host is meant to see.
+# shellcheck disable=SC2016
+converge_host_configs() { # <home> <root-abs>
+  local home=$1 root=$2 f
+  generate_host_config "$root/.claude/settings.json" "$home/.claude/settings.json" \
+    '$CLAUDE_PROJECT_DIR' "$root"
+  generate_host_config "$root/.cursor/hooks.json" "$home/.cursor/hooks.json" \
+    '$CURSOR_PROJECT_DIR' "$root"
+  # codex takes its root from the harness cwd and then self-checks that the same
+  # directory holds bin/, AGENTS.md, and .codex/hooks.json. Rewriting only the
+  # assignment leaves those checks intact, now aimed at the shared clone.
+  generate_host_config "$root/.codex/hooks.json" "$home/.codex/hooks.json" \
+    'root=$(pwd -P)' "root=$root"
+  # grok's entries gate on GROK_WORKSPACE_ROOT being set before using it as the
+  # root. Only the path use is rewritten, so the "am I under grok?" gate stands.
+  if [ -d "$root/.grok/hooks" ]; then
+    for f in "$root"/.grok/hooks/*.json; do
+      [ -f "$f" ] || continue
+      generate_host_config "$f" "$home/.grok/hooks/$(basename "$f")" \
+        '${GROK_WORKSPACE_ROOT:-}/bin/' "$root/bin/"
+    done
+  fi
+  if [ -d "$root/.opencode/plugins" ]; then
+    mkdir -p "$home/.opencode"
+    converge_symlink "$home/.opencode/plugins" "$FM_ROOT/.opencode/plugins" || return 1
+  fi
+  if [ -d "$root/.pi/extensions" ]; then
+    mkdir -p "$home/.pi"
+    converge_symlink "$home/.pi/extensions" "$FM_ROOT/.pi/extensions" || return 1
+  fi
+}
+
 # Hide the home from the enclosing project's git through .git/info/exclude. That
 # file is local and untracked, so the captain's repository is never modified.
 exclude_home_from_project() { # <project-top>
@@ -225,14 +306,9 @@ cmd_init() {
 @AGENTS.md
 EOF
 
-  # The tracked hook config addresses its scripts as $CLAUDE_PROJECT_DIR/bin/...,
-  # which resolves to this home rather than the code root, so the absolute FM_ROOT
-  # is substituted in. Regenerated on every converge so an upstream hook change
-  # reaches this home through a plain re-init.
-  if [ -f "$root_abs/.claude/settings.json" ]; then
-    sed "s|\\\$CLAUDE_PROJECT_DIR|$root_abs|g" "$root_abs/.claude/settings.json" \
-      | write_if_changed "$home/.claude/settings.json"
-  fi
+  # Regenerated on every converge, so an upstream hook change reaches this home
+  # through a plain re-init.
+  converge_host_configs "$home" "$root_abs" || exit 1
 
   write_if_changed "$home/$MARKER_NAME" <<EOF
 project=$top

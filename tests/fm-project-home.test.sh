@@ -7,6 +7,8 @@
 # These cases pin the properties that make that safe:
 #   SHAPE       init creates the marker, the shared-surface symlinks, the single
 #               projects/<name> back-link, and a seeded registry entry.
+#   HOST CONFIG every supported primary harness's host config lands in the home
+#               addressing the SHARED clone's bin/, never the home's own.
 #   NO BIN LINK a bin/ symlink is never created. Reached through one, a script
 #               resolves its code root to the HOME, which would aim the
 #               worktree-tangle guard at the project's own branch.
@@ -93,6 +95,214 @@ test_init_shape() {
   pass "fm-project-home: init creates the marker, shared-surface links, back-link, and seeded registry"
 }
 
+# --- HOST CONFIGS -----------------------------------------------------------
+
+# Every supported primary harness reaches firstmate through its own host config,
+# and in a per-project home the harness project dir is the HOME, not the shared
+# clone. A config left addressing that project dir points at a bin/ which does
+# not exist there, and every one of these hosts fails SILENTLY in that case: the
+# codex and grok entries self-check and exit 0, and the opencode plugin swallows
+# its spawn error. The session then runs with no supervision and no diagnostic,
+# which is why this is asserted per host rather than trusted.
+#
+# Rows are "kind|source|dest|forbidden":
+#   file  generated from one shared file with the root expression substituted
+#   glob  a directory of such files
+#   link  a directory the host resolves in EXECUTED code, which reads
+#         FM_ROOT_OVERRIDE, so the shared directory is linked rather than copied
+# "forbidden" is the root expression that must not survive into the home.
+expected_host_configs() {
+  cat <<'ROWS'
+file|.claude/settings.json|.claude/settings.json|$CLAUDE_PROJECT_DIR
+file|.cursor/hooks.json|.cursor/hooks.json|$CURSOR_PROJECT_DIR
+file|.codex/hooks.json|.codex/hooks.json|root=$(pwd -P)
+glob|.grok/hooks|.grok/hooks|${GROK_WORKSPACE_ROOT:-}/bin/
+link|.opencode/plugins|.opencode/plugins|
+link|.pi/extensions|.pi/extensions|
+ROWS
+}
+
+# A generated host config is correct when it names the shared clone and still
+# carries its hook scripts. Each host spells the qualified path its own way -
+# claude and cursor as "<root>"/bin/..., grok as "<root>/bin/...", codex through
+# a root= assignment the entry expands later - so the assertion is the presence
+# of the absolute root plus the absence of the project-dir expression, not one
+# adjacency pattern that would only fit some of them.
+assert_addresses_shared_clone() { # <file> <label>
+  local file=$1 label=$2
+  assert_grep "$ROOT_ABS" "$file" "$label must address the shared clone by absolute path"
+  grep -qF '/bin/fm-' "$file" || fail "$label must still name at least one firstmate hook script"
+}
+
+# Overwrite every generated host config with content that could not survive a
+# real converge, and point every linked host directory somewhere wrong.
+stale_every_host_config() { # <home>
+  local home=$1 kind src dest forbidden f
+  while IFS='|' read -r kind src dest forbidden; do
+    [ -n "$kind" ] || continue
+    case "$kind" in
+      file)
+        [ -f "$ROOT/$src" ] || continue
+        mkdir -p "$(dirname "$home/$dest")"
+        printf 'stale\n' > "$home/$dest"
+        ;;
+      glob)
+        [ -d "$ROOT/$src" ] || continue
+        mkdir -p "$home/$dest"
+        for f in "$ROOT/$src"/*.json; do
+          [ -f "$f" ] || continue
+          printf 'stale\n' > "$home/$dest/$(basename "$f")"
+        done
+        ;;
+      link)
+        [ -d "$ROOT/$src" ] || continue
+        mkdir -p "$(dirname "$home/$dest")"
+        ln -sfn /nonexistent/drifted "$home/$dest"
+        ;;
+    esac
+  done <<EOF
+$(expected_host_configs)
+EOF
+}
+
+assert_every_host_config_converged() { # <home>
+  local home=$1 kind src dest forbidden f base
+  while IFS='|' read -r kind src dest forbidden; do
+    [ -n "$kind" ] || continue
+    case "$kind" in
+      file)
+        [ -f "$ROOT/$src" ] || continue
+        assert_no_grep "stale" "$home/$dest" "re-init must regenerate a stale $dest"
+        assert_no_grep "$forbidden" "$home/$dest" \
+          "the regenerated $dest must not defer to the harness project dir"
+        assert_addresses_shared_clone "$home/$dest" "the regenerated $dest"
+        ;;
+      glob)
+        [ -d "$ROOT/$src" ] || continue
+        for f in "$ROOT/$src"/*.json; do
+          [ -f "$f" ] || continue
+          base=$(basename "$f")
+          assert_no_grep "stale" "$home/$dest/$base" "re-init must regenerate a stale $base"
+          assert_addresses_shared_clone "$home/$dest/$base" "the regenerated $base"
+        done
+        ;;
+      link)
+        [ -d "$ROOT/$src" ] || continue
+        [ "$(cd "$home/$dest" && pwd -P)" = "$(cd "$ROOT/$src" && pwd -P)" ] \
+          || fail "re-init must repair a drifted $dest link"
+        ;;
+    esac
+  done <<EOF
+$(expected_host_configs)
+EOF
+}
+
+test_host_configs_address_the_shared_clone() {
+  local proj home kind src dest forbidden f base matched=0
+  proj=$(make_project "$TMP_ROOT/hosts")
+  "$HOMESH" init "$proj" >/dev/null 2>&1 || fail "init failed"
+  home="$proj/.firstmate"
+
+  while IFS='|' read -r kind src dest forbidden; do
+    [ -n "$kind" ] || continue
+    case "$kind" in
+      file)
+        [ -f "$ROOT/$src" ] || continue
+        matched=1
+        assert_present "$home/$dest" "the home must carry a generated $src for its host"
+        assert_no_grep "$forbidden" "$home/$dest" \
+          "the generated $dest must not defer to the harness project dir"
+        assert_addresses_shared_clone "$home/$dest" "the generated $dest"
+        ;;
+      glob)
+        [ -d "$ROOT/$src" ] || continue
+        for f in "$ROOT/$src"/*.json; do
+          [ -f "$f" ] || continue
+          matched=1
+          base=$(basename "$f")
+          assert_present "$home/$dest/$base" "the home must carry a generated $base"
+          assert_no_grep "$forbidden" "$home/$dest/$base" \
+            "the generated $base must not defer to the harness project dir"
+          assert_addresses_shared_clone "$home/$dest/$base" "the generated $base"
+        done
+        ;;
+      link)
+        [ -d "$ROOT/$src" ] || continue
+        matched=1
+        [ -L "$home/$dest" ] || fail "$dest must be a symlink into the shared clone"
+        [ "$(cd "$home/$dest" && pwd -P)" = "$(cd "$ROOT/$src" && pwd -P)" ] \
+          || fail "$dest must resolve to the shared clone's $src"
+        ;;
+    esac
+  done <<EOF
+$(expected_host_configs)
+EOF
+
+  # A matrix that matched nothing would pass every assertion above vacuously.
+  [ "$matched" = 1 ] || fail "the host matrix matched no host config in the shared clone"
+
+  pass "fm-project-home: every harness host config in the home addresses the shared clone"
+}
+
+# The plugin hosts resolve firstmate's bin/ in executed code, from the project
+# directory the harness hands them - which is the HOME. FM_ROOT_OVERRIDE, which
+# bin/fm-launch.sh exports, is what redirects them to the shared clone. Prove it
+# through the plugin's own public hook, with a stub root whose guard announces
+# itself, so the assertion cannot pass on the derived path by accident.
+test_opencode_plugins_prefer_root_override() {
+  local proj home stub out
+  proj=$(make_project "$TMP_ROOT/oc-override")
+  "$HOMESH" init "$proj" >/dev/null 2>&1 || fail "init failed"
+  home="$proj/.firstmate"
+
+  if ! command -v node >/dev/null 2>&1; then
+    pass "fm-project-home: opencode root override (SKIPPED: node absent)"
+    return 0
+  fi
+
+  stub="$TMP_ROOT/oc-stub-root"
+  mkdir -p "$stub/bin"
+  cat > "$stub/bin/fm-cd-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+echo "STUB-ROOT-GUARD-RAN" >&2
+exit 2
+SH
+  chmod +x "$stub/bin/fm-cd-pretool-check.sh"
+
+  run_cd_plugin() { # <root-override> <project-dir>
+    local override=$1 dir=$2
+    NODE_NO_WARNINGS=1 FM_ROOT_OVERRIDE="$override" node --input-type=module -e "
+      const { FmPrimaryCdCheck } = await import('$ROOT_ABS/.opencode/plugins/fm-primary-cd-check.js');
+      const hooks = await FmPrimaryCdCheck({ directory: '$dir', worktree: '$dir' });
+      try {
+        await hooks['tool.execute.before']({ tool: 'bash' }, { args: { command: 'cd /tmp' } });
+        console.log('NO-THROW');
+      } catch (e) { console.log('THREW: ' + e.message); }
+    " 2>&1
+  }
+
+  # The home is the project dir the harness reports; the override names the root.
+  out=$(run_cd_plugin "$stub" "$home") || fail "the plugin harness failed: $out"
+  assert_contains "$out" "STUB-ROOT-GUARD-RAN" \
+    "the plugin must reach the guard through FM_ROOT_OVERRIDE, not the harness project dir"
+  assert_contains "$out" "THREW:" "a denying guard must still block the tool call"
+
+  # With no override the derived project dir must still be honored, or the same
+  # plugin would stop working in the shared clone it was written for.
+  out=$(env -u FM_ROOT_OVERRIDE NODE_NO_WARNINGS=1 node --input-type=module -e "
+    const { FmPrimaryCdCheck } = await import('$ROOT_ABS/.opencode/plugins/fm-primary-cd-check.js');
+    const hooks = await FmPrimaryCdCheck({ directory: '$stub', worktree: '$stub' });
+    try {
+      await hooks['tool.execute.before']({ tool: 'bash' }, { args: { command: 'cd /tmp' } });
+      console.log('NO-THROW');
+    } catch (e) { console.log('THREW: ' + e.message); }
+  " 2>&1) || fail "the plugin harness failed: $out"
+  assert_contains "$out" "STUB-ROOT-GUARD-RAN" \
+    "with no override the plugin must still resolve the root it was handed"
+
+  pass "fm-project-home: opencode plugins resolve firstmate's bin/ through FM_ROOT_OVERRIDE"
+}
+
 # --- NO BIN LINK ------------------------------------------------------------
 
 # A bin/ symlink is the one shortcut that silently breaks the layout: a script
@@ -140,7 +350,7 @@ test_home_invisible_to_project_git() {
 # --- CONVERGENT -------------------------------------------------------------
 
 test_init_converges() {
-  local proj home before after gen
+  local proj home before after
   proj=$(make_project "$TMP_ROOT/converge")
   "$HOMESH" init "$proj" >/dev/null 2>&1 || fail "init failed"
   home="$proj/.firstmate"
@@ -152,7 +362,7 @@ test_init_converges() {
   # Drift: a legacy symlink where the generated contract belongs - the exact shape
   # a home created before that fix carries - plus a stale generated hook config.
   ln -sfn /nonexistent/AGENTS.md "$home/AGENTS.md"
-  printf 'stale\n' > "$home/.claude/settings.json"
+  stale_every_host_config "$home"
 
   before=$(cat "$home/data/projects.md")
   "$HOMESH" init "$proj" >/dev/null 2>&1 || fail "re-init failed"
@@ -176,16 +386,9 @@ test_init_converges() {
   assert_grep "You are the first mate" "$home/AGENTS.md" "re-init must refresh a stale contract copy"
   assert_no_grep "outdated" "$home/AGENTS.md" "re-init must not leave stale contract bytes behind"
 
-  # The generated hook config addresses the shared clone, never the home, because
-  # $CLAUDE_PROJECT_DIR resolves to the home when the harness runs there.
-  if [ -f "$ROOT/.claude/settings.json" ]; then
-    gen=$(cat "$home/.claude/settings.json")
-    assert_not_contains "$gen" "stale" "re-init must regenerate a stale hook config"
-    assert_not_contains "$gen" 'CLAUDE_PROJECT_DIR' \
-      "the generated hook config must not defer to the harness project dir"
-    assert_contains "$gen" "$ROOT_ABS" "the generated hook config must address the shared clone"
-    assert_contains "$gen" "/bin/fm-turnend-guard.sh" "the generated hook config must keep its hook scripts"
-  fi
+  # Every host config must come back addressing the shared clone. A home that
+  # converged only Claude's would leave the other harnesses silently unsupervised.
+  assert_every_host_config_converged "$home"
 
   pass "fm-project-home: init converges drift and preserves data, state, and the registry"
 }
@@ -282,6 +485,8 @@ test_launch_alias_shim() {
 }
 
 test_init_shape
+test_host_configs_address_the_shared_clone
+test_opencode_plugins_prefer_root_override
 test_no_bin_symlink
 test_home_invisible_to_project_git
 test_init_converges

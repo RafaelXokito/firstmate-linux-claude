@@ -178,6 +178,7 @@ family_for_basename() {
       printf '%s\n' secondmate
       ;;
     fm-bootstrap.test.sh|fm-fleet-sync.test.sh|fm-gate-refuse.test.sh|fm-gotmp.test.sh|\
+    fm-project-home.test.sh|\
     fm-session-start.test.sh|fm-sessionstart-nudge.test.sh|fm-startup-network.test.sh|\
     fm-tangle-guard.test.sh|fm-update.test.sh)
       printf '%s\n' session-bootstrap
@@ -913,11 +914,18 @@ families_for_changed_path() {
       printf '%s\n' session-bootstrap
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
-    .pi/extensions/fm-primary-turnend-guard.ts)
-      # The run tier's two harness-supplied facts (source vocabulary and
-      # context-reset stdout injection) only show up against a real harness.
+    .cursor/hooks.json|.grok/hooks/*|.opencode/plugins/*|\
+    .pi/extensions/*)
+      # Every primary host-config surface. bin/fm-project-home.sh copies or links
+      # each of these into a per-project home, so a change here also changes what
+      # that home hands its harness. The run tier's two harness-supplied facts
+      # (source vocabulary and context-reset stdout injection) only show up
+      # against a real harness.
       printf '%s\n' session-bootstrap
       printf '%s\n' live-harness-optin
+      ;;
+    bin/fm-project-home.sh|bin/fm-launch.sh)
+      printf '%s\n' session-bootstrap
       ;;
     bin/fm-timeout-lib.sh)
       # The shared hard bound: session start's runtime bound, the fleet/bearings

@@ -205,6 +205,7 @@ When it is unset, most scripts use the repo root as the home; when it is set, sc
 `FM_ROOT_OVERRIDE` overrides the firstmate repo root used by scripts, including the primary checkout watched by the worktree-tangle guard.
 When `FM_HOME` is unset, it also behaves as the old whole-root override.
 A per-project home must set both: `FM_HOME` selects `<project>/.firstmate` and `FM_ROOT_OVERRIDE` names the shared tracked clone, because a script that resolved its code root from inside the home would aim the worktree-tangle guard at the project's own branch and alarm on every feature branch.
+`FM_ROOT_OVERRIDE` carries a second load: the plugin and extension hosts (`.opencode/plugins/`, `.pi/extensions/`) resolve firstmate's `bin/` in executed code and read it to reach the shared clone, since the project directory their harness reports is the home.
 `bin/fm-launch.sh` exports the pair, and `bin/fm-launch.sh env` prints it for a shell that needs it directly.
 `bin/fm-send.sh` is intentionally stricter than that general fallback: it requires `FM_HOME` to be set before resolving a target, so operator steers cannot silently resolve against the wrong home.
 `FM_STATE_OVERRIDE`, `FM_DATA_OVERRIDE`, `FM_PROJECTS_OVERRIDE`, and `FM_CONFIG_OVERRIDE` override individual operational directories for tests and specialized harness setup.
