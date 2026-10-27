@@ -53,6 +53,10 @@ FM_BACKEND_DEFAULT_ROOT="$(cd "$FM_BACKEND_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# Session variables a multiplexer server or a launched agent must not inherit
+# from the Claude Code session that started it (bin/fm-claude-session-env-lib.sh).
+# shellcheck source=bin/fm-claude-session-env-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-claude-session-env-lib.sh"
 
 # Verified backend adapters. Extend only after a backend gets its own
 # bin/backends/<name>.sh and empirical verification, mirroring AGENTS.md

@@ -2727,9 +2727,16 @@ case "$HARNESS" in
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
+# Every verified harness also drops the Claude Code session variables a pane can inherit
+# from whatever session started its multiplexer server, so a claude crewmate is
+# never taken for a sub-session of that parent (bin/fm-claude-session-env-lib.sh).
+claude_session_unset=$(fm_claude_session_env_unset_args)
 case "$HARNESS" in
   claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
-    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
+    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $claude_session_unset $LAUNCH"
+    ;;
+  cursor)
+    LAUNCH="env $claude_session_unset $LAUNCH"
     ;;
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not

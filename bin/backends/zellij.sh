@@ -119,6 +119,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-backend-hometag-lib.sh
 . "$FM_BACKEND_ZELLIJ_ROOT/bin/fm-backend-hometag-lib.sh"
 
+# shellcheck source=bin/fm-claude-session-env-lib.sh
+. "$FM_BACKEND_ZELLIJ_ROOT/bin/fm-claude-session-env-lib.sh"
+
 # Shared composer classification (the fleet-wide shape catalogue and verdict
 # owner; this adapter contributes only capture and capability facts).
 # shellcheck source=bin/fm-composer-lib.sh
@@ -232,11 +235,12 @@ fm_backend_zellij_session_exists() {  # <session>
 # actually attach without a TTY, so it exits after creating); running it again
 # against an EXISTING session prints "Session already exists" and exits 1 -
 # harmless here because existence is checked first and the launch is
-# backgrounded, its exit status never inspected.
+# backgrounded, its exit status never inspected. Like herdr's, the session
+# starts without the caller's Claude Code session variables.
 fm_backend_zellij_server_ensure() {  # <session>
   local session=$1 i
   fm_backend_zellij_session_exists "$session" && return 0
-  ( nohup zellij attach -b "$session" </dev/null >/dev/null 2>&1 & ) || return 1
+  ( fm_claude_session_env_clear; nohup zellij attach -b "$session" </dev/null >/dev/null 2>&1 & ) || return 1
   for i in $(seq 1 20); do
     fm_backend_zellij_session_exists "$session" && return 0
     sleep 0.5

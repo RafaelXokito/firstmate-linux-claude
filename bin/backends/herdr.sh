@@ -86,6 +86,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-transition-lib.sh"
 
+# shellcheck source=bin/fm-claude-session-env-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-claude-session-env-lib.sh"
+
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
 # events.subscribe (the native pane.agent_status_changed push stream) and its
 # subscription_event schema first shipped at protocol 16 (verified: herdr
@@ -1446,12 +1449,14 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
 # headless (no TUI client) if not already running, mirroring tmux's `tmux
 # has-session || tmux new-session -d`. Verified: a bare socket CLI call does
 # NOT auto-start the server, so this must run before any workspace/tab/pane
-# call. Bounded poll for the server to report running.
+# call. Bounded poll for the server to report running. The server outlives
+# this call and hands its environment to every pane, so it starts without the
+# caller's Claude Code session variables (bin/fm-claude-session-env-lib.sh).
 fm_backend_herdr_server_ensure() {  # <session>
   local session=$1 running out i
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = "true" ] && return 0
-  ( fm_backend_herdr_cli "$session" server >/dev/null 2>&1 & ) || return 1
+  ( fm_claude_session_env_clear; fm_backend_herdr_cli "$session" server >/dev/null 2>&1 & ) || return 1
   for i in $(seq 1 20); do
     running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
     [ "$running" = "true" ] && return 0

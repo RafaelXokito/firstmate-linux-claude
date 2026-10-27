@@ -13,6 +13,9 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 
+# The Claude Code session variables every launch clears, from their single owner.
+CLAUDE_SESSION_UNSET=$(. "$ROOT/bin/fm-claude-session-env-lib.sh" && fm_claude_session_env_unset_args)
+
 make_spawn_pi_probe() {
   local fakebin=$1 tool=$2
   cat > "$fakebin/$tool" <<'SH'
@@ -165,7 +168,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $CLAUDE_SESSION_UNSET CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -184,6 +187,30 @@ test_non_cursor_launch_clears_inherited_cursor_markers() {
   assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS" \
     "non-cursor launch must clear both inherited Cursor identity markers"
   pass "non-cursor launches clear inherited Cursor identity markers"
+}
+
+test_claude_launch_clears_inherited_claude_session() {
+  local rec id out status launch prefix child_env
+  id=profile-claude-session-leak-z1c
+  rec=$(make_spawn_case profile-claude-session-leak claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  # Run everything the pane would run before `claude` itself, in a pane
+  # environment that inherited a parent Claude Code session.
+  prefix=${launch%%claude --dangerously-skip-permissions*}
+  [ "$prefix" != "$launch" ] || fail "claude launch has no recognizable claude command: $launch"
+  child_env=$(env CLAUDECODE=1 CLAUDE_CODE_CHILD_SESSION=1 CLAUDE_CODE_SESSION_ID=parent \
+    CLAUDE_PID=4242 FM_TEST_KEEP=kept bash -c "$prefix env")
+  assert_not_contains "$child_env" "CLAUDE_CODE_CHILD_SESSION=" "claude crewmate would inherit the parent's child-session marker"
+  assert_not_contains "$child_env" "CLAUDE_CODE_SESSION_ID=" "claude crewmate would inherit the parent's session id"
+  assert_not_contains "$child_env" "CLAUDECODE=" "claude crewmate would inherit the parent's CLAUDECODE marker"
+  assert_contains "$child_env" "FM_TEST_KEEP=kept" "claude launch dropped an unrelated variable"
+  assert_contains "$child_env" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false" "claude launch lost its own prompt-suggestion setting"
+  pass "claude crewmates never inherit a parent Claude Code session from their pane"
 }
 
 test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
@@ -770,7 +797,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $CLAUDE_SESSION_UNSET CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -828,6 +855,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
+test_claude_launch_clears_inherited_claude_session
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths
