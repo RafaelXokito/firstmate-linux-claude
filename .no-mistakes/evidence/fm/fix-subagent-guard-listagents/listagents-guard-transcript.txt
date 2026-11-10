@@ -1,0 +1,14 @@
+# BEFORE (base 5c2fdef, full base bin/) - regression reproduction
+base   --tool ListAgents       exit=2 stderr={"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[subagent-dispatch] the firstmate primary dispatches through t
+
+# AFTER (b99e373) - primary home
+after  --tool ListAgents       exit=0 stdout='' stderr=
+after  --tool SendMessage      exit=2 stdout='' stderr={"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[subagent-di
+after  --tool Agent            exit=2 stdout='' stderr={"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[subagent-di
+after  --tool ListAgentsSpawn  exit=2 stdout='' stderr={"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[subagent-di
+after  --tool SpawnListAgents  exit=2 stdout='' stderr={"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[subagent-di
+after  --tool TaskOutput       exit=0 stdout='' stderr=
+
+# AFTER via Claude PreToolUse stdin JSON payload
+stdin  tool_name=ListAgents   exit=0 stdout_bytes=0 stderr=
+stdin  tool_name=SendMessage  exit=2 stdout_bytes=0 stderr={"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"}
