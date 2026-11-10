@@ -106,7 +106,7 @@ test_guard_allows_ordinary_and_observe_only_tools() {
   done
   # Observing or stopping work that already exists is not creating unaccounted
   # work, and blocking it would strand a runaway task with no way to end it.
-  for tool in TaskOutput TaskStop TaskGet TaskList CronList BashOutput KillShell; do
+  for tool in TaskOutput TaskStop TaskGet TaskList CronList BashOutput KillShell ListAgents; do
     expect_allow "observe-or-stop tool" "$tool"
   done
   pass "the guard leaves ordinary tools and observe-or-stop operations alone"
@@ -132,6 +132,16 @@ test_plan_only_exclusion_is_exact_name() {
     expect_deny "plan-only near miss" "$tool"
   done
   pass "the plan-only exclusion releases exactly two names and nothing that merely contains them"
+}
+
+test_observe_only_exclusion_is_exact_name() {
+  # ListAgents only lists existing agents and sessions, but the exclusion must
+  # stay exact-name so a delegation tool that merely contains it stays denied.
+  local tool
+  for tool in ListAgentsSpawn SpawnListAgents; do
+    expect_deny "observe-only near miss" "$tool"
+  done
+  pass "the observe-only exclusion releases ListAgents and nothing that merely contains it"
 }
 
 test_guard_never_classifies_mcp_tools() {
@@ -281,6 +291,7 @@ test_guard_denies_hypothetical_future_tools
 test_guard_allows_ordinary_and_observe_only_tools
 test_guard_allows_session_local_todo_tools
 test_plan_only_exclusion_is_exact_name
+test_observe_only_exclusion_is_exact_name
 test_guard_never_classifies_mcp_tools
 test_deny_message_defers_to_intake_classification
 test_escape_hatch_allows_deliberate_use
